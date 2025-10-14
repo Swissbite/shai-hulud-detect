@@ -56,7 +56,10 @@ const MALICIOUS_HASHES: string[] = [];
 const COMPROMISED_FOUND: string[] = [];
 const SUSPICIOUS_FOUND: string[] = [];
 const SUSPICIOUS_CONTENT: string[] = [];
-const CRYPTO_PATTERNS: string[] = [];
+
+const CRYPTO_THEFT_HIGH_RISK: string[] = [];
+const CRYPTO_THEFT_MEDIUM_RISK: string[] = [];
+const CRYPTO_THEFT_LOW_RISK: string[] = [];
 const GIT_BRANCHES: string[] = [];
 const POSTINSTALL_HOOKS: string[] = [];
 const TRUFFLEHOG_ACTIVITY: string[] = [];
@@ -66,12 +69,30 @@ const LOW_RISK_FINDINGS: string[] = [];
 const INTEGRITY_ISSUES: string[] = [];
 const TYPOSQUATTING_WARNINGS: string[] = [];
 const NETWORK_EXFILTRATION_WARNINGS: string[] = [];
+const LOCKFILE_SAFE_VERSIONS: string[] = [];
 
 let COMPROMISED_PACKAGES: string[] = [];
+
+// Temporary files for cleanup
+const TEMP_FILES: string[] = [];
 
 // Utility functions
 function printStatus(color: string, message: string): void {
     console.log(`${color}${message}${COLORS.NC}`);
+}
+
+// Cleanup function for temporary files - async for better performance
+async function cleanup(): Promise<void> {
+    const cleanupPromises = TEMP_FILES.map(async (tempFile) => {
+        try {
+            await Deno.remove(tempFile);
+        } catch {
+            // Ignore cleanup errors silently
+        }
+    });
+    
+    // Execute all cleanup operations in parallel
+    await Promise.all(cleanupPromises);
 }
 
 function showFilePreview(filePath: string, context: string): void {
@@ -266,8 +287,25 @@ async function checkPackages(scanDir: string): Promise<void> {
                             // Exact match - definitely compromised
                             COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${maliciousVersion}`);
                         } else if (semverMatch(maliciousVersion, foundVersion)) {
-                            // Semver pattern match - potentially compromised
-                            SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${foundVersion}`);
+                            // Semver pattern match - check lockfile for actual version
+                            const packageDir = packageFile.replace(/\/package\.json$/, '');
+                            const actualVersion = await getLockfileVersion(packageName, packageDir, scanDir);
+                            
+                            if (actualVersion) {
+                                if (actualVersion === maliciousVersion) {
+                                    // Lockfile contains exact compromised version - HIGH RISK
+                                    COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
+                                } else if (semverMatch(maliciousVersion, actualVersion)) {
+                                    // Lockfile version still matches pattern - MEDIUM RISK
+                                    SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
+                                } else {
+                                    // Lockfile pins to safe version - LOW RISK
+                                    LOCKFILE_SAFE_VERSIONS.push(`${packageFile}:${packageName}@${foundVersion} (locked to ${actualVersion} - safe)`);
+                                }
+                            } else {
+                                // No lockfile found - potential update risk - MEDIUM RISK
+                                SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${foundVersion}`);
+                            }
                         }
                     }
                 }
@@ -364,34 +402,39 @@ async function checkCryptoTheftPatterns(scanDir: string): Promise<void> {
         try {
             const content = await Deno.readTextFile(file);
             
-            if (/0x[a-fA-F0-9]{40}/.test(content)) {
-                if (/ethereum|wallet|address|crypto/i.test(content)) {
-                    CRYPTO_PATTERNS.push(`${file}:Ethereum wallet address patterns detected`);
-                }
-            }
-            
-            if (content.includes('XMLHttpRequest.prototype.send')) {
-                CRYPTO_PATTERNS.push(`${file}:XMLHttpRequest prototype modification detected`);
+            // HIGH RISK crypto theft patterns
+            if (/0xFc4a4858bafef54D1b1d7697bfb5c52F4c166976|1H13VnQJKtT4HjD5ZFKaaiZEetMbG7nDHx|TB9emsCq6fQw6wRk4HBxxNnU6Hwt1DnV67/.test(content)) {
+                CRYPTO_THEFT_HIGH_RISK.push(`${file}:Known attacker wallet address detected - HIGH RISK`);
             }
             
             if (/checkethereumw|runmask|newdlocal|_0x19ca67/.test(content)) {
-                CRYPTO_PATTERNS.push(`${file}:Known crypto theft function names detected`);
-            }
-            
-            if (/0xFc4a4858bafef54D1b1d7697bfb5c52F4c166976|1H13VnQJKtT4HjD5ZFKaaiZEetMbG7nDHx|TB9emsCq6fQw6wRk4HBxxNnU6Hwt1DnV67/.test(content)) {
-                CRYPTO_PATTERNS.push(`${file}:Known attacker wallet address detected - HIGH RISK`);
+                CRYPTO_THEFT_HIGH_RISK.push(`${file}:Known crypto theft function names detected`);
             }
             
             if (content.includes('npmjs.help')) {
-                CRYPTO_PATTERNS.push(`${file}:Phishing domain npmjs.help detected`);
+                CRYPTO_THEFT_HIGH_RISK.push(`${file}:Phishing domain npmjs.help detected`);
+            }
+            
+            // MEDIUM RISK crypto theft patterns
+            if (content.includes('XMLHttpRequest.prototype.send')) {
+                CRYPTO_THEFT_MEDIUM_RISK.push(`${file}:XMLHttpRequest prototype modification detected`);
             }
             
             if (content.includes('javascript-obfuscator')) {
-                CRYPTO_PATTERNS.push(`${file}:JavaScript obfuscation detected`);
+                CRYPTO_THEFT_MEDIUM_RISK.push(`${file}:JavaScript obfuscation detected`);
+            }
+            
+            // LOW RISK crypto patterns (legitimate usage)
+            if (/0x[a-fA-F0-9]{40}/.test(content)) {
+                if (/ethereum|wallet|address|crypto/i.test(content) && !isLegitimatePattern(file, content)) {
+                    CRYPTO_THEFT_LOW_RISK.push(`${file}:Ethereum wallet address patterns detected`);
+                }
             }
             
             if (/ethereum.*0x[a-fA-F0-9]|bitcoin.*[13][a-km-zA-HJ-NP-Z1-9]/.test(content)) {
-                CRYPTO_PATTERNS.push(`${file}:Cryptocurrency regex patterns detected`);
+                if (!isLegitimatePattern(file, content)) {
+                    CRYPTO_THEFT_LOW_RISK.push(`${file}:Cryptocurrency regex patterns detected`);
+                }
             }
         } catch {
             // Skip files we can't read
@@ -439,7 +482,7 @@ function getFileContext(filePath: string): string {
     return 'source_code';
 }
 
-function isLegitimatePattern(filePath: string, contentSample: string): boolean {
+function isLegitimatePattern(_filePath: string, contentSample: string): boolean {
     if (contentSample.includes('process.env.NODE_ENV') && contentSample.includes('production')) return true;
     if (contentSample.includes('createApp') || contentSample.includes('Vue')) return true;
     if (contentSample.includes('webpack') || contentSample.includes('vite') || contentSample.includes('rollup')) return true;
@@ -601,7 +644,7 @@ async function checkPackageIntegrity(scanDir: string): Promise<void> {
     for (const lockFile of lockFiles) {
         try {
             let content: string;
-            let originalFile = lockFile;
+            const originalFile = lockFile;
             
             if (lockFile.endsWith('pnpm-lock.yaml')) {
                 const pnpmContent = await Deno.readTextFile(lockFile);
@@ -770,7 +813,7 @@ async function checkNetworkExfiltration(scanDir: string): Promise<void> {
                                 }
                             }
                             
-                            let snippet = suspiciousUsage[0];
+                            const snippet = suspiciousUsage[0];
                             if (file.includes('.min.js') || snippet.length > 150) {
                                 const shortSnippet = snippet.substring(0, 40) + '...';
                                 NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious domain found: ${domain}${lineNum ? ` at line ${lineNum}` : ''}: ...${shortSnippet}...`);
@@ -873,25 +916,112 @@ function semverMatch(testSubject: string, testPattern: string): boolean {
     return false;
 }
 
-// Show a processing indicator while a promise is pending
-async function showProcessingIndicator(promise: Promise<unknown>, prefix?: string): Promise<void> {
-    let counter = 0;
-    const symbols = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+async function getLockfileVersion(packageName: string, packageDir: string, scanBoundary: string): Promise<string> {
+    // Search upward for lockfiles (supports packages in node_modules subdirectories)
+    let currentDir = packageDir;
     
-    const intervalId = setInterval(() => {
-        process.stdout.clearLine(0);
-        process.stdout.cursorTo(0);
-        process.stdout.write((prefix ? prefix + " " : "") + symbols[counter % symbols.length] + " ");
-        counter++;
-    }, 200);
-    
-    try {
-        await promise;
-    } finally {
-        clearInterval(intervalId);
-        process.stdout.clearLine(0);
-        process.stdout.cursorTo(0);
+    // Traverse up the directory tree until we find a lockfile, reach root, or hit scan boundary
+    while (currentDir !== '/' && currentDir !== '.' && currentDir !== '') {
+        // SECURITY: Don't search above the original scan directory boundary
+        if (!currentDir.startsWith(scanBoundary + '/') && currentDir !== scanBoundary) {
+            break;
+        }
+        
+        // Check for package-lock.json first (most common)
+        const packageLockPath = `${currentDir}/package-lock.json`;
+        try {
+            const content = await Deno.readTextFile(packageLockPath);
+            const foundVersion = extractVersionFromPackageLock(content, packageName);
+            if (foundVersion) {
+                return foundVersion;
+            }
+        } catch {
+            // File doesn't exist, continue
+        }
+        
+        // Check for yarn.lock
+        const yarnLockPath = `${currentDir}/yarn.lock`;
+        try {
+            const content = await Deno.readTextFile(yarnLockPath);
+            const lines = content.split('\n');
+            for (const line of lines) {
+                if (line.match(new RegExp(`^"?${packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}@`))) {
+                    const match = line.match(/@([^"]*)/);
+                    if (match && match[1]) {
+                        return match[1];
+                    }
+                }
+            }
+        } catch {
+            // File doesn't exist, continue
+        }
+        
+        // Check for pnpm-lock.yaml
+        const pnpmLockPath = `${currentDir}/pnpm-lock.yaml`;
+        try {
+            const content = await Deno.readTextFile(pnpmLockPath);
+            const jsonContent = transformPnpmYaml(content);
+            const foundVersion = extractVersionFromPackageLock(jsonContent, packageName);
+            if (foundVersion) {
+                return foundVersion;
+            }
+        } catch {
+            // File doesn't exist, continue
+        }
+        
+        // Move to parent directory
+        const parentDir = currentDir.split('/').slice(0, -1).join('/');
+        if (parentDir === currentDir) break; // Prevent infinite loop
+        currentDir = parentDir || '/';
     }
+    
+    return '';
+}
+
+function extractVersionFromPackageLock(content: string, packageName: string): string {
+    const lines = content.split('\n');
+    let inBlock = false;
+    let braceCount = 0;
+    
+    for (const line of lines) {
+        if (line.includes(`"node_modules/${packageName}":`)) {
+            inBlock = true;
+            braceCount = 1;
+            continue;
+        }
+        
+        if (inBlock) {
+            if (line.includes('{') && !line.includes(`"node_modules/${packageName}":`)) {
+                braceCount++;
+            }
+            if (line.includes('}')) {
+                braceCount--;
+                if (braceCount <= 0) {
+                    inBlock = false;
+                }
+            }
+            if (line.includes('"version":')) {
+                const match = line.match(/"version":\s*"([^"]+)"/);
+                if (match && match[1]) {
+                    return match[1];
+                }
+            }
+        }
+    }
+    
+    // For pnpm transformed content, try simpler extraction
+    const simpleMatch = content.match(new RegExp(`"${packageName}":\\s*{[^}]*"version":\\s*"([^"]+)"`));
+    if (simpleMatch && simpleMatch[1]) {
+        return simpleMatch[1];
+    }
+    
+    return '';
+}
+
+// Show a processing indicator while a promise is pending
+async function showProcessingIndicator(promise: Promise<unknown>, _prefix?: string): Promise<void> {
+    // Simplified for compatibility - just wait for the promise
+    await promise;
 }
 
 function generateReport(paranoidMode: boolean): void {
@@ -907,6 +1037,7 @@ function generateReport(paranoidMode: boolean): void {
     
     let highRisk = 0;
     let mediumRisk = 0;
+    let lowRisk = 0;
     
     // Report malicious workflow files
     if (WORKFLOW_FILES.length > 0) {
@@ -973,15 +1104,10 @@ function generateReport(paranoidMode: boolean): void {
         console.log();
     }
     
-    // Report cryptocurrency theft patterns
-    const cryptoHigh = CRYPTO_PATTERNS.filter(entry => 
-        entry.includes("HIGH RISK") || entry.includes("Known attacker wallet") || entry.includes("XMLHttpRequest prototype")
-    );
-    const cryptoMedium = CRYPTO_PATTERNS.filter(entry => !cryptoHigh.includes(entry));
-    
-    if (cryptoHigh.length > 0) {
+    // High risk crypto theft patterns
+    if (CRYPTO_THEFT_HIGH_RISK.length > 0) {
         printStatus(COLORS.RED, "🚨 HIGH RISK: Cryptocurrency theft patterns detected:");
-        for (const entry of cryptoHigh) {
+        for (const entry of CRYPTO_THEFT_HIGH_RISK) {
             console.log(`   - ${entry}`);
             highRisk++;
         }
@@ -990,14 +1116,38 @@ function generateReport(paranoidMode: boolean): void {
         console.log();
     }
     
-    if (cryptoMedium.length > 0) {
+    // Medium risk crypto theft patterns
+    if (CRYPTO_THEFT_MEDIUM_RISK.length > 0) {
         printStatus(COLORS.YELLOW, "⚠️  MEDIUM RISK: Potential cryptocurrency manipulation patterns:");
-        for (const entry of cryptoMedium) {
+        for (const entry of CRYPTO_THEFT_MEDIUM_RISK) {
             console.log(`   - ${entry}`);
             mediumRisk++;
         }
-        console.log(`   ${COLORS.YELLOW}NOTE: These may be legitimate crypto tools or framework code.${COLORS.NC}`);
+        console.log(`   ${COLORS.YELLOW}NOTE: These patterns may indicate malicious activity.${COLORS.NC}`);
         console.log(`   ${COLORS.YELLOW}Manual review recommended to determine if they are malicious.${COLORS.NC}`);
+        console.log();
+    }
+    
+    // Low risk crypto patterns (mostly legitimate usage)
+    if (CRYPTO_THEFT_LOW_RISK.length > 0) {
+        printStatus(COLORS.BLUE, "ℹ️  LOW RISK: Cryptocurrency-related patterns detected:");
+        for (const entry of CRYPTO_THEFT_LOW_RISK) {
+            console.log(`   - ${entry}`);
+            lowRisk++;
+        }
+        console.log(`   ${COLORS.BLUE}NOTE: These may be legitimate crypto tools or framework code.${COLORS.NC}`);
+        console.log(`   ${COLORS.BLUE}Review recommended only if other high-risk indicators are present.${COLORS.NC}`);
+        console.log();
+    }
+    
+    // Report lockfile-safe versions
+    if (LOCKFILE_SAFE_VERSIONS.length > 0) {
+        printStatus(COLORS.GREEN, "✅ GOOD: Lockfile-protected packages:");
+        for (const entry of LOCKFILE_SAFE_VERSIONS) {
+            console.log(`   - ${entry}`);
+        }
+        console.log(`   ${COLORS.GREEN}NOTE: These packages match suspicious patterns in package.json but are${COLORS.NC}`);
+        console.log(`   ${COLORS.GREEN}locked to safe versions in lockfiles, reducing actual risk.${COLORS.NC}`);
         console.log();
     }
     
@@ -1228,7 +1378,7 @@ function usage(): void {
     Deno.exit(1);
 }
 // Show a processing indicator while a promise is pending
-async function showProcessingIndicatorForPromise(promise: Promise<unknown>, prefix?: string): Promise<void> {
+async function _showProcessingIndicatorForPromise(promise: Promise<unknown>, prefix?: string): Promise<void> {
     function timeoutPromise(ms: number): Promise<"timeout"> {
         return new Promise<"timeout">((resolve) => {
             setTimeout(() => {
@@ -1338,9 +1488,32 @@ async function main(): Promise<void> {
     
     // Generate report
     generateReport(paranoidMode);
+    
+    // Cleanup temporary files
+    await cleanup();
+}
+
+// Setup signal handlers for graceful shutdown
+function setupSignalHandlers(): void {
+    const signalHandler = async () => {
+        console.log("\n🧹 Cleaning up temporary files...");
+        await cleanup();
+        Deno.exit(0);
+    };
+    
+    // Handle Ctrl+C and other termination signals
+    Deno.addSignalListener("SIGINT", signalHandler);
+    Deno.addSignalListener("SIGTERM", signalHandler);
 }
 
 // Run main function
 if (import.meta.main) {
-    await main();
+    setupSignalHandlers();
+    try {
+        await main();
+    } catch (error) {
+        console.error("Error during execution:", error);
+        await cleanup();
+        Deno.exit(1);
+    }
 }
