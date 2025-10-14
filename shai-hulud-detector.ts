@@ -6,8 +6,6 @@
 
 // Color codes for output
 
-import process from "node:process";
-
 const COLORS = {
     RED: '\x1b[0;31m',
     YELLOW: '\x1b[1;33m',
@@ -167,14 +165,12 @@ async function* walkDirectory(dir: string): AsyncGenerator<string> {
     }
 }
 
-async function findFiles(dir: string, pattern: RegExp): Promise<string[]> {
-    const files: string[] = [];
+async function* findFilesByPattern(dir: string, pattern: RegExp): AsyncGenerator<string> {
     for await (const file of walkDirectory(dir)) {
         if (pattern.test(file)) {
-            files.push(file);
+            yield file;
         }
     }
-    return files;
 }
 
 function transformPnpmYaml(content: string): string {
@@ -218,8 +214,7 @@ function transformPnpmYaml(content: string): string {
 async function checkWorkflowFiles(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for malicious workflow files...");
     
-    const files = await findFiles(scanDir, /shai-hulud-workflow\.yml$/);
-    for (const file of files) {
+    for await (const file of findFilesByPattern(scanDir, /shai-hulud-workflow\.yml$/)) {
         try {
             const stat = await Deno.stat(file);
             if (stat.isFile) {
@@ -232,18 +227,23 @@ async function checkWorkflowFiles(scanDir: string): Promise<void> {
 }
 
 async function checkFileHashes(scanDir: string): Promise<void> {
-    const jsFiles = await findFiles(scanDir, /\.(js|ts|json)$/);
+    // Use generator to collect files first
+    const jsFiles: string[] = [];
+    for await (const file of findFilesByPattern(scanDir, /\.(js|ts|json)$/)) {
+        jsFiles.push(file);
+    }
     
     printStatus(COLORS.BLUE, `🔍 Checking ${jsFiles.length} files for known malicious content...`);
-    
-    const promises = jsFiles.map(async (file, index) => {
+    let fileProcessedCounter = 0;
+    const hashPromises = jsFiles.map(async (file) => {
         try {
             const data = await Deno.readFile(file);
             const hash = await sha256(data);
-            
-            // Progress indicator
-            if (index % 10 === 0) {
-                process.stdout.write(`\r\x1b[K${index + 1} / ${jsFiles.length} checked (${Math.floor((index + 1) * 100 / jsFiles.length)} %)`);
+            fileProcessedCounter++;
+            // Progress indicator every 10 files
+            if (fileProcessedCounter % 10 === 0) {
+                const progressText = `\r\x1b[K${fileProcessedCounter} / ${jsFiles.length} checked (${Math.floor((fileProcessedCounter) * 100 / jsFiles.length)}%)`;
+                Deno.stdout.writeSync(new TextEncoder().encode(progressText));
             }
             
             // Check for malicious files
@@ -254,23 +254,30 @@ async function checkFileHashes(scanDir: string): Promise<void> {
             // Skip files we can't read
         }
     });
-    
-    await Promise.all(promises);
-    process.stdout.write(`\r\x1b[K`);
+
+    await Promise.all(hashPromises);
+
+    // Clear progress line
+    Deno.stdout.writeSync(new TextEncoder().encode(`\r\x1b[K`));
 }
 
 async function checkPackages(scanDir: string): Promise<void> {
-    const packageFiles = await findFiles(scanDir, /package\.json$/);
+    // Use generator to collect package files
+    const packageFiles: string[] = [];
+    for await (const file of findFilesByPattern(scanDir, /package\.json$/)) {
+        packageFiles.push(file);
+    }
     
     printStatus(COLORS.BLUE, `🔍 Checking ${packageFiles.length} package.json files for compromised packages...`);
-    
-    const promises = packageFiles.map(async (packageFile, index) => {
+    let fileProcessedCounter = 0;
+    const packagePromises = packageFiles.map(async (packageFile) => {
         try {
             const content = await Deno.readTextFile(packageFile);
-            
-            // Progress indicator
-            if (index % 5 === 0) {
-                process.stdout.write(`\r\x1b[K${index + 1} / ${packageFiles.length} checked (${Math.floor((index + 1) * 100 / packageFiles.length)} %)`);
+            fileProcessedCounter++;
+            // Progress indicator every 5 files
+            if (fileProcessedCounter % 5 === 0) {
+                const progressText = `\r\x1b[K${fileProcessedCounter} / ${packageFiles.length} checked (${Math.floor((fileProcessedCounter) * 100 / packageFiles.length)}%)`;
+                Deno.stdout.writeSync(new TextEncoder().encode(progressText));
             }
             
             // Check for specific compromised packages
@@ -321,84 +328,87 @@ async function checkPackages(scanDir: string): Promise<void> {
             // Skip files we can't read
         }
     });
-    
-    await Promise.all(promises);
-    process.stdout.write(`\r\x1b[K`);
+
+    await Promise.all(packagePromises);
+    // Clear progress line
+    Deno.stdout.writeSync(new TextEncoder().encode(`\r\x1b[K`));
 }
 
 async function checkPostinstallHooks(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for suspicious postinstall hooks...");
     
-    const packageFiles = await findFiles(scanDir, /package\.json$/);
-    
-    for (const packageFile of packageFiles) {
-        try {
-            const content = await Deno.readTextFile(packageFile);
-            
-            if (content.includes('"postinstall"')) {
-                const lines = content.split('\n');
-                let postinstallCmd = '';
+    const packagePromises: Promise<void>[] = [];
+    for await (const packageFile of findFilesByPattern(scanDir, /package\.json$/)) {
+        packagePromises.push((async () => {
+            try {
+                const content = await Deno.readTextFile(packageFile);
                 
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes('"postinstall"')) {
-                        // Look for the command in the next few lines
-                        for (let j = i; j < Math.min(i + 3, lines.length); j++) {
-                            const cmdMatch = lines[j].match(/"([^"]*)"[^"]*$/);
-                            if (cmdMatch && !lines[j].includes('"postinstall"')) {
-                                postinstallCmd = cmdMatch[1];
-                                break;
+                if (content.includes('"postinstall"')) {
+                    const lines = content.split('\n');
+                    let postinstallCmd = '';
+                    
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].includes('"postinstall"')) {
+                            // Look for the command in the next few lines
+                            for (let j = i; j < Math.min(i + 3, lines.length); j++) {
+                                const cmdMatch = lines[j].match(/"([^"]*)"[^"]*$/);
+                                if (cmdMatch && !lines[j].includes('"postinstall"')) {
+                                    postinstallCmd = cmdMatch[1];
+                                    break;
+                                }
                             }
+                            break;
                         }
-                        break;
+                    }
+                    
+                    // Check for suspicious patterns in postinstall commands
+                    if (postinstallCmd && (
+                        postinstallCmd.includes('curl') ||
+                        postinstallCmd.includes('wget') ||
+                        postinstallCmd.includes('node -e') ||
+                        postinstallCmd.includes('eval') ||
+                        postinstallCmd.includes('base64')
+                    )) {
+                        POSTINSTALL_HOOKS.push(`${packageFile}:Suspicious postinstall: ${postinstallCmd}`);
                     }
                 }
-                
-                // Check for suspicious patterns in postinstall commands
-                if (postinstallCmd && (
-                    postinstallCmd.includes('curl') ||
-                    postinstallCmd.includes('wget') ||
-                    postinstallCmd.includes('node -e') ||
-                    postinstallCmd.includes('eval') ||
-                    postinstallCmd.includes('base64')
-                )) {
-                    POSTINSTALL_HOOKS.push(`${packageFile}:Suspicious postinstall: ${postinstallCmd}`);
-                }
+            } catch {
+                // Skip files we can't read
             }
-        } catch {
-            // Skip files we can't read
-        }
+        })());
     }
+    
+    await Promise.all(packagePromises);
 }
 
 async function checkContent(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for suspicious content patterns...");
     
-    const files = await findFiles(scanDir, /\.(js|ts|json|yml|yaml)$/);
-    
-    const promises = files.map(async (file) => {
-        try {
-            const content = await Deno.readTextFile(file);
-            
-            if (content.includes('webhook.site')) {
-                SUSPICIOUS_CONTENT.push(`${file}:webhook.site reference`);
+    const contentPromises: Promise<void>[] = [];
+    for await (const file of findFilesByPattern(scanDir, /\.(js|ts|json|yml|yaml)$/)) {
+        contentPromises.push((async () => {
+            try {
+                const content = await Deno.readTextFile(file);
+                
+                if (content.includes('webhook.site')) {
+                    SUSPICIOUS_CONTENT.push(`${file}:webhook.site reference`);
+                }
+                if (content.includes('bb8ca5f6-4175-45d2-b042-fc9ebb8170b7')) {
+                    SUSPICIOUS_CONTENT.push(`${file}:malicious webhook endpoint`);
+                }
+            } catch {
+                // Skip files we can't read
             }
-            if (content.includes('bb8ca5f6-4175-45d2-b042-fc9ebb8170b7')) {
-                SUSPICIOUS_CONTENT.push(`${file}:malicious webhook endpoint`);
-            }
-        } catch {
-            // Skip files we can't read
-        }
-    });
+        })());
+    }
     
-    await Promise.all(promises);
+    await Promise.all(contentPromises);
 }
 
 async function checkCryptoTheftPatterns(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for cryptocurrency theft patterns...");
-    
-    const files = await findFiles(scanDir, /\.(js|ts|json)$/);
-    
-    const promises = files.map(async (file) => {
+
+    for await (const file of findFilesByPattern(scanDir, /\.(js|ts|json)$/)) {
         try {
             const content = await Deno.readTextFile(file);
             
@@ -439,17 +449,13 @@ async function checkCryptoTheftPatterns(scanDir: string): Promise<void> {
         } catch {
             // Skip files we can't read
         }
-    });
-    
-    await Promise.all(promises);
+    }
 }
 
 async function checkGitBranches(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for suspicious git branches...");
-    
-    const gitDirs = await findFiles(scanDir, /\.git$/);
-    
-    for (const gitDir of gitDirs) {
+
+    for await (const gitDir of findFilesByPattern(scanDir, /\.git$/)) {
         try {
             const stat = await Deno.stat(gitDir);
             if (stat.isDirectory) {
@@ -493,8 +499,7 @@ async function checkTrufflehogActivity(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for Trufflehog activity and secret scanning...");
     
     // Look for trufflehog binary files
-    const trufflehogFiles = await findFiles(scanDir, /trufflehog/);
-    for (const file of trufflehogFiles) {
+    for await (const file of findFilesByPattern(scanDir, /trufflehog/)) {
         try {
             const stat = await Deno.stat(file);
             if (stat.isFile) {
@@ -506,83 +511,84 @@ async function checkTrufflehogActivity(scanDir: string): Promise<void> {
     }
     
     // Look for potential trufflehog activity in files
-    const files = await findFiles(scanDir, /\.(js|py|sh|json)$/);
-    
-    const promises = files.map(async (file) => {
-        try {
-            const content = await Deno.readTextFile(file);
-            const context = getFileContext(file);
-            const contentSample = content.split('\n').slice(0, 20).join(' ');
-            
-            // Check for explicit trufflehog references
-            if (/trufflehog|TruffleHog/i.test(content)) {
-                switch (context) {
-                    case 'documentation':
-                        break; // Skip documentation
-                    case 'node_modules':
-                    case 'type_definitions':
-                    case 'build_output':
-                        TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains trufflehog references in ${context}`);
-                        break;
-                    default:
-                        if (content.includes('subprocess') && content.includes('curl')) {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Suspicious trufflehog execution pattern`);
-                        } else {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains trufflehog references in source code`);
-                        }
-                }
-            }
-            
-            // Check for credential scanning combined with exfiltration
-            if (/AWS_ACCESS_KEY|GITHUB_TOKEN|NPM_TOKEN/.test(content)) {
-                switch (context) {
-                    case 'type_definitions':
-                    case 'documentation':
-                        break; // Skip
-                    case 'node_modules':
-                        TRUFFLEHOG_ACTIVITY.push(`${file}:LOW:Credential patterns in node_modules`);
-                        break;
-                    case 'configuration':
-                        if (!(content.includes('DefinePlugin') || content.includes('webpack'))) {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Credential patterns in configuration`);
-                        }
-                        break;
-                    default:
-                        if (content.includes('webhook.site') || content.includes('curl') || content.includes('https.request')) {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Credential patterns with potential exfiltration`);
-                        } else {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains credential scanning patterns`);
-                        }
-                }
-            }
-            
-            // Check for environment variable scanning
-            if (/process\.env|os\.environ|getenv/.test(content)) {
-                switch (context) {
-                    case 'type_definitions':
-                    case 'documentation':
-                    case 'configuration':
-                        break; // Skip
-                    case 'node_modules':
-                    case 'build_output':
-                        if (!isLegitimatePattern(file, contentSample)) {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:LOW:Environment variable access in ${context}`);
-                        }
-                        break;
-                    default:
-                        if (content.includes('webhook.site') && content.includes('exfiltrat')) {
-                            TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Environment scanning with exfiltration`);
-                        } else if (/scan|harvest|steal/.test(content)) {
-                            if (!isLegitimatePattern(file, contentSample)) {
-                                TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Potentially suspicious environment variable access`);
+    const promises: Promise<void>[] = [];
+    for await (const file of findFilesByPattern(scanDir, /\.(js|py|sh|json)$/)) {
+        promises.push((async () => {
+            try {
+                const content = await Deno.readTextFile(file);
+                const context = getFileContext(file);
+                const contentSample = content.split('\n').slice(0, 20).join(' ');
+                
+                // Check for explicit trufflehog references
+                if (/trufflehog|TruffleHog/i.test(content)) {
+                    switch (context) {
+                        case 'documentation':
+                            break; // Skip documentation
+                        case 'node_modules':
+                        case 'type_definitions':
+                        case 'build_output':
+                            TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains trufflehog references in ${context}`);
+                            break;
+                        default:
+                            if (content.includes('subprocess') && content.includes('curl')) {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Suspicious trufflehog execution pattern`);
+                            } else {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains trufflehog references in source code`);
                             }
-                        }
+                    }
                 }
+                
+                // Check for credential scanning combined with exfiltration
+                if (/AWS_ACCESS_KEY|GITHUB_TOKEN|NPM_TOKEN/.test(content)) {
+                    switch (context) {
+                        case 'type_definitions':
+                        case 'documentation':
+                            break; // Skip
+                        case 'node_modules':
+                            TRUFFLEHOG_ACTIVITY.push(`${file}:LOW:Credential patterns in node_modules`);
+                            break;
+                        case 'configuration':
+                            if (!(content.includes('DefinePlugin') || content.includes('webpack'))) {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Credential patterns in configuration`);
+                            }
+                            break;
+                        default:
+                            if (content.includes('webhook.site') || content.includes('curl') || content.includes('https.request')) {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Credential patterns with potential exfiltration`);
+                            } else {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Contains credential scanning patterns`);
+                            }
+                    }
+                }
+                
+                // Check for environment variable scanning
+                if (/process\.env|os\.environ|getenv/.test(content)) {
+                    switch (context) {
+                        case 'type_definitions':
+                        case 'documentation':
+                        case 'configuration':
+                            break; // Skip
+                        case 'node_modules':
+                        case 'build_output':
+                            if (!isLegitimatePattern(file, contentSample)) {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:LOW:Environment variable access in ${context}`);
+                            }
+                            break;
+                        default:
+                            if (content.includes('webhook.site') && content.includes('exfiltrat')) {
+                                TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:Environment scanning with exfiltration`);
+                            } else if (/scan|harvest|steal/.test(content)) {
+                                if (!isLegitimatePattern(file, contentSample)) {
+                                    TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Potentially suspicious environment variable access`);
+                                }
+                            }
+                    }
+                }
+            } catch {
+                // Skip files we can't read
             }
-        } catch {
-            // Skip files we can't read
-        }
-    });
+        })());
+    }
     
     await Promise.all(promises);
 }
@@ -590,9 +596,7 @@ async function checkTrufflehogActivity(scanDir: string): Promise<void> {
 async function checkShaiHuludRepos(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking for Shai-Hulud repositories and migration patterns...");
     
-    const gitDirs = await findFiles(scanDir, /\.git$/);
-    
-    for (const gitDir of gitDirs) {
+    for await (const gitDir of findFilesByPattern(scanDir, /\.git$/)) {
         try {
             const stat = await Deno.stat(gitDir);
             if (stat.isDirectory) {
@@ -639,9 +643,7 @@ async function checkShaiHuludRepos(scanDir: string): Promise<void> {
 async function checkPackageIntegrity(scanDir: string): Promise<void> {
     printStatus(COLORS.BLUE, "🔍 Checking package lock files for integrity issues...");
     
-    const lockFiles = await findFiles(scanDir, /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/);
-    
-    for (const lockFile of lockFiles) {
+    for await (const lockFile of findFilesByPattern(scanDir, /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/)) {
         try {
             let content: string;
             const originalFile = lockFile;
@@ -694,9 +696,7 @@ async function checkTyposquatting(scanDir: string): Promise<void> {
         "jquery", "bootstrap", "socket.io", "redis", "mongoose", "passport"
     ];
     
-    const packageFiles = await findFiles(scanDir, /package\.json$/);
-    
-    for (const packageFile of packageFiles) {
+    for await (const packageFile of findFilesByPattern(scanDir, /package\.json$/)) {
         try {
             const content = await Deno.readTextFile(packageFile);
             const packageNames = new Set<string>();
@@ -763,100 +763,104 @@ async function checkNetworkExfiltration(scanDir: string): Promise<void> {
         "pipedream.com", "zapier.com/hooks"
     ];
     
-    const files = await findFiles(scanDir, /\.(js|ts|json|mjs)$/);
+    const promises: Promise<void>[] = [];
     
-    const promises = files.map(async (file) => {
-        try {
-            const content = await Deno.readTextFile(file);
-            
-            // Skip vendor/library files to reduce false positives
-            if (!file.includes('/vendor/') && !file.includes('/node_modules/')) {
-                // Check for hardcoded IP addresses
-                const ipMatches = content.match(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g);
-                if (ipMatches) {
-                    const filteredIps = ipMatches.filter(ip => 
-                        ip !== '127.0.0.1' && ip !== '0.0.0.0'
-                    );
-                    if (filteredIps.length > 0) {
-                        const ipsContext = filteredIps.slice(0, 3).join(' ');
-                        if (file.includes('.min.js')) {
-                            NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Hardcoded IP addresses found (minified file): ${ipsContext}`);
-                        } else {
-                            NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Hardcoded IP addresses found: ${ipsContext}`);
+    for await (const file of findFilesByPattern(scanDir, /\.(js|ts|json|mjs)$/)) {
+        const promise = (async (): Promise<void> => {
+            try {
+                const content = await Deno.readTextFile(file);
+                
+                // Skip vendor/library files to reduce false positives
+                if (!file.includes('/vendor/') && !file.includes('/node_modules/')) {
+                    // Check for hardcoded IP addresses
+                    const ipMatches = content.match(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g);
+                    if (ipMatches) {
+                        const filteredIps = ipMatches.filter(ip => 
+                            ip !== '127.0.0.1' && ip !== '0.0.0.0'
+                        );
+                        if (filteredIps.length > 0) {
+                            const ipsContext = filteredIps.slice(0, 3).join(' ');
+                            if (file.includes('.min.js')) {
+                                NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Hardcoded IP addresses found (minified file): ${ipsContext}`);
+                            } else {
+                                NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Hardcoded IP addresses found: ${ipsContext}`);
+                            }
                         }
                     }
                 }
-            }
-            
-            // Check for suspicious domains
-            if (!file.includes('package-lock.json') && !file.includes('yarn.lock') && 
-                !file.includes('/vendor/') && !file.includes('/node_modules/')) {
                 
-                for (const domain of suspiciousDomains) {
-                    const domainRegex = new RegExp(`https?://[^\\s]*${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|\\s${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s/\\"']`, 'g');
-                    const matches = content.match(domainRegex);
+                // Check for suspicious domains
+                if (!file.includes('package-lock.json') && !file.includes('yarn.lock') && 
+                    !file.includes('/vendor/') && !file.includes('/node_modules/')) {
                     
-                    if (matches) {
-                        const suspiciousUsage = matches.filter(match => 
-                            !match.trim().startsWith('#') && !match.trim().startsWith('//')
-                        );
+                    for (const domain of suspiciousDomains) {
+                        const domainRegex = new RegExp(`https?://[^\\s]*${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|\\s${domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s/\\"']`, 'g');
+                        const matches = content.match(domainRegex);
                         
-                        if (suspiciousUsage.length > 0) {
-                            const lines = content.split('\n');
-                            let lineNum = 0;
-                            for (let i = 0; i < lines.length; i++) {
-                                if (lines[i].includes(domain) && 
-                                    !lines[i].trim().startsWith('#') && 
-                                    !lines[i].trim().startsWith('//')) {
-                                    lineNum = i + 1;
-                                    break;
+                        if (matches) {
+                            const suspiciousUsage = matches.filter(match => 
+                                !match.trim().startsWith('#') && !match.trim().startsWith('//')
+                            );
+                            
+                            if (suspiciousUsage.length > 0) {
+                                const lines = content.split('\n');
+                                let lineNum = 0;
+                                for (let i = 0; i < lines.length; i++) {
+                                    if (lines[i].includes(domain) && 
+                                        !lines[i].trim().startsWith('#') && 
+                                        !lines[i].trim().startsWith('//')) {
+                                        lineNum = i + 1;
+                                        break;
+                                    }
+                                }
+                                
+                                const snippet = suspiciousUsage[0];
+                                if (file.includes('.min.js') || snippet.length > 150) {
+                                    const shortSnippet = snippet.substring(0, 40) + '...';
+                                    NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious domain found: ${domain}${lineNum ? ` at line ${lineNum}` : ''}: ...${shortSnippet}...`);
+                                } else {
+                                    const shortSnippet = snippet.substring(0, 80) + (snippet.length > 80 ? '...' : '');
+                                    NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious domain found: ${domain}${lineNum ? ` at line ${lineNum}` : ''}: ${shortSnippet}`);
                                 }
                             }
-                            
-                            const snippet = suspiciousUsage[0];
-                            if (file.includes('.min.js') || snippet.length > 150) {
-                                const shortSnippet = snippet.substring(0, 40) + '...';
-                                NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious domain found: ${domain}${lineNum ? ` at line ${lineNum}` : ''}: ...${shortSnippet}...`);
-                            } else {
-                                const shortSnippet = snippet.substring(0, 80) + (snippet.length > 80 ? '...' : '');
-                                NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious domain found: ${domain}${lineNum ? ` at line ${lineNum}` : ''}: ${shortSnippet}`);
-                            }
                         }
                     }
                 }
-            }
-            
-            // Additional checks for base64 decoding, DNS-over-HTTPS, WebSocket, etc.
-            if (!file.includes('/vendor/') && !file.includes('/node_modules/')) {
-                if (content.includes('atob(') || content.includes('base64') && content.includes('decode')) {
-                    const lines = content.split('\n');
-                    let lineNum = 0;
-                    let snippet = '';
-                    
-                    for (let i = 0; i < lines.length; i++) {
-                        if (lines[i].includes('atob') || (lines[i].includes('base64') && lines[i].includes('decode'))) {
-                            lineNum = i + 1;
-                            if (file.includes('.min.js') || lines[i].length > 500) {
-                                const match = lines[i].match(/.{0,30}atob.{0,30}/);
-                                snippet = match ? match[0] : lines[i].substring(0, 60);
-                            } else {
-                                snippet = lines[i].substring(0, 80);
+                
+                // Additional checks for base64 decoding, DNS-over-HTTPS, WebSocket, etc.
+                if (!file.includes('/vendor/') && !file.includes('/node_modules/')) {
+                    if (content.includes('atob(') || content.includes('base64') && content.includes('decode')) {
+                        const lines = content.split('\n');
+                        let lineNum = 0;
+                        let snippet = '';
+                        
+                        for (let i = 0; i < lines.length; i++) {
+                            if (lines[i].includes('atob') || (lines[i].includes('base64') && lines[i].includes('decode'))) {
+                                lineNum = i + 1;
+                                if (file.includes('.min.js') || lines[i].length > 500) {
+                                    const match = lines[i].match(/.{0,30}atob.{0,30}/);
+                                    snippet = match ? match[0] : lines[i].substring(0, 60);
+                                } else {
+                                    snippet = lines[i].substring(0, 80);
+                                }
+                                break;
                             }
-                            break;
+                        }
+                        
+                        if (lineNum > 0) {
+                            NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Base64 decoding at line ${lineNum}: ${snippet}...`);
+                        } else {
+                            NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Base64 decoding detected`);
                         }
                     }
-                    
-                    if (lineNum > 0) {
-                        NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Base64 decoding at line ${lineNum}: ${snippet}...`);
-                    } else {
-                        NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Base64 decoding detected`);
-                    }
                 }
+            } catch {
+                // Skip files we can't read
             }
-        } catch {
-            // Skip files we can't read
-        }
-    });
+        })();
+        
+        promises.push(promise);
+    }
     
     await Promise.all(promises);
 }
@@ -1018,11 +1022,44 @@ function extractVersionFromPackageLock(content: string, packageName: string): st
     return '';
 }
 
-// Show a processing indicator while a promise is pending
-async function showProcessingIndicator(promise: Promise<unknown>, _prefix?: string): Promise<void> {
-    // Simplified for compatibility - just wait for the promise
-    await promise;
+// Native Deno progress indicator using stdout.writeSync
+class ProgressIndicator {
+    private intervalId?: number;
+    private counter = 0;
+    private readonly symbols = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    private readonly encoder = new TextEncoder();
+
+    start(message: string): void {
+        this.counter = 0;
+        this.intervalId = setInterval(() => {
+            const text = `\r${message} ${this.symbols[this.counter % this.symbols.length]} `;
+            Deno.stdout.writeSync(this.encoder.encode(text));
+            this.counter++;
+        }, 150);
+    }
+
+    stop(): void {
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = undefined;
+        }
+        // Clear the line
+        const clearText = '\r' + ' '.repeat(80) + '\r';
+        Deno.stdout.writeSync(this.encoder.encode(clearText));
+    }
+
+    async withProgress<T>(promise: Promise<T>, message: string): Promise<T> {
+        this.start(message);
+        try {
+            const result = await promise;
+            return result;
+        } finally {
+            this.stop();
+        }
+    }
 }
+
+const progressIndicator = new ProgressIndicator();
 
 function generateReport(paranoidMode: boolean): void {
     console.log();
@@ -1377,29 +1414,6 @@ function usage(): void {
     console.log("  deno run --allow-read --allow-run shai-hulud-detector.ts --paranoid /path/to/your/project         # Core + advanced security checks");
     Deno.exit(1);
 }
-// Show a processing indicator while a promise is pending
-async function _showProcessingIndicatorForPromise(promise: Promise<unknown>, prefix?: string): Promise<void> {
-    function timeoutPromise(ms: number): Promise<"timeout"> {
-        return new Promise<"timeout">((resolve) => {
-            setTimeout(() => {
-                resolve("timeout");
-            }, ms);
-        });
-    }
-
-    let counter = 0;
-    const symbols = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    process.stdout.write((prefix ? prefix + " " : "") + symbols[0]);
-    while (await Promise.race([promise, timeoutPromise(200)]) === "timeout") {
-        process.stdout.clearLine(0);
-        process.stdout.cursorTo(0);
-        process.stdout.write((prefix ? prefix + " " : "") + symbols[counter % symbols.length] + " ");
-        counter++;
-    }
-    
-    process.stdout.clearLine(0);
-    process.stdout.cursorTo(0);
-}
 
 async function main(): Promise<void> {
     let paranoidMode = false;
@@ -1460,7 +1474,7 @@ async function main(): Promise<void> {
     console.log();
 
     // Run core Shai-Hulud detection checks with enhanced progress indicators
-    await showProcessingIndicator(
+    await progressIndicator.withProgress(
         Promise.all([
             checkWorkflowFiles(scanDir),
             checkPostinstallHooks(scanDir),
@@ -1471,7 +1485,7 @@ async function main(): Promise<void> {
             checkShaiHuludRepos(scanDir),
             checkPackageIntegrity(scanDir)
         ]),
-        "🔍"
+        "🔍 Running security checks..."
     );
     
     // These need to run sequentially due to progress indicators
