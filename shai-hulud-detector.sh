@@ -6,6 +6,26 @@
 
 set -eo pipefail
 
+# Array to track temp files for cleanup
+TEMP_FILES=()
+
+# Function: cleanup
+# Purpose: Clean up temporary files on script exit, interrupt, or termination
+# Args: None (uses $? for exit code)
+# Modifies: Removes files tracked in TEMP_FILES array
+# Returns: Exits with original script exit code
+cleanup() {
+    local exit_code=$?
+    # Clean up temp files
+    for temp_file in "${TEMP_FILES[@]}"; do
+        [[ -f "$temp_file" ]] && rm -f "$temp_file"
+    done
+    exit $exit_code
+}
+
+# Set trap for cleanup on exit, interrupt, or termination
+trap cleanup EXIT INT TERM
+
 # Color codes for output
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -33,9 +53,11 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
   PARALLELISM=$(sysctl -n hw.ncpu)
 fi
 
-# Load compromised packages from external file
-# This allows for easier maintenance and updates as new compromised packages are discovered
-# Currently contains 571+ confirmed package versions from multiple September 2025 npm attacks
+# Function: load_compromised_packages
+# Purpose: Load compromised package database from external file or fallback list
+# Args: None (reads from compromised-packages.txt in script directory)
+# Modifies: COMPROMISED_PACKAGES (global array)
+# Returns: Populates COMPROMISED_PACKAGES with 604+ package:version entries
 load_compromised_packages() {
     local script_dir="$(cd "$(dirname "$0")" && pwd)"
     local packages_file="$script_dir/compromised-packages.txt"
@@ -45,6 +67,8 @@ load_compromised_packages() {
     if [[ -f "$packages_file" ]]; then
         # Read packages from file, skipping comments and empty lines
         while IFS= read -r line; do
+            # Trim potential Windows carriage returns
+            line="${line%$'\r'}"
             # Skip comments and empty lines
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line// }" ]] && continue
@@ -109,8 +133,13 @@ LOW_RISK_FINDINGS=()
 INTEGRITY_ISSUES=()
 TYPOSQUATTING_WARNINGS=()
 NETWORK_EXFILTRATION_WARNINGS=()
+LOCKFILE_SAFE_VERSIONS=()
 
-# Usage function
+# Function: usage
+# Purpose: Display help message and exit
+# Args: None
+# Modifies: None
+# Returns: Exits with code 1
 usage() {
     echo "Usage: $0 [--paranoid] [--parallelism N] <directory_to_scan>"
     echo
@@ -125,14 +154,22 @@ usage() {
     exit 1
 }
 
-# Print colored output
+# Function: print_status
+# Purpose: Print colored status messages to console
+# Args: $1 = color code (RED, YELLOW, GREEN, BLUE, NC), $2 = message text
+# Modifies: None (outputs to stdout)
+# Returns: Prints colored message
 print_status() {
     local color=$1
     local message=$2
     echo -e "${color}${message}${NC}"
 }
 
-# Show file content preview (simplified for less verbose output)
+# Function: show_file_preview
+# Purpose: Display file context for HIGH RISK findings only
+# Args: $1 = file_path, $2 = context description
+# Modifies: None (outputs to stdout)
+# Returns: Prints formatted file preview box for HIGH RISK items only
 show_file_preview() {
     local file_path=$1
     local context="$2"
@@ -146,7 +183,33 @@ show_file_preview() {
     fi
 }
 
-# Check for shai-hulud workflow files
+# Function: show_progress
+# Purpose: Display real-time progress indicator for file scanning operations
+# Args: $1 = current files processed, $2 = total files to process
+# Modifies: None (outputs to stderr with ANSI escape codes)
+# Returns: Prints "X / Y checked (Z %)" with line clearing
+show_progress() {
+    local current=$1
+    local total=$2
+    local percent=0
+    [[ $total -gt 0 ]] && percent=$((current * 100 / total))
+    echo -ne "\r\033[K$current / $total checked ($percent %)"
+}
+
+# Function: count_files
+# Purpose: Count files matching find criteria, returns clean integer
+# Args: All arguments passed to find command (e.g., path, -name, -type)
+# Modifies: None
+# Returns: Integer count of matching files (strips whitespace)
+count_files() {
+    find "$@" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# Function: check_workflow_files
+# Purpose: Detect malicious shai-hulud-workflow.yml files in project directories
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: WORKFLOW_FILES (global array)
+# Returns: Populates WORKFLOW_FILES array with paths to suspicious workflow files
 check_workflow_files() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for malicious workflow files..."
@@ -159,12 +222,17 @@ check_workflow_files() {
     done < <(find "$scan_dir" -name "shai-hulud-workflow.yml" 2>/dev/null)
 }
 
-# Check file hashes against known malicious hash
+# Function: check_file_hashes
+# Purpose: Scan files and compare SHA256 hashes against known malicious hash list
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: MALICIOUS_HASHES (global array)
+# Returns: Populates MALICIOUS_HASHES array with "file:hash" entries for matches
 check_file_hashes() {
     local scan_dir=$1
 
     local filesCount
-    filesCount=$(($(find "$scan_dir" -type f \( -name "*.js" -o -name "*.ts" -o -name "*.json" \) | wc -l 2>/dev/null)))
+    filesCount=$(count_files "$scan_dir" -type f \( -name "*.js" -o -name "*.ts" -o -name "*.json" \))
+    filesCount=$((filesCount))
 
     print_status "$BLUE" "🔍 Checking $filesCount files for known malicious content..."
 
@@ -182,7 +250,7 @@ check_file_hashes() {
         done
 
         filesChecked=$((filesChecked+1))
-        echo -ne "\r\033[K$filesChecked / $filesCount checked ($((filesChecked*100/filesCount)) %)"
+        show_progress "$filesChecked" "$filesCount"
     done < <(\
       find "$scan_dir" -type f \( -name "*.js" -o -name "*.ts" -o -name "*.json" \) -print0 2>/dev/null |\
       xargs -0 -P ${PARALLELISM} -I. shasum -a 256 . 2>/dev/null
@@ -190,8 +258,11 @@ check_file_hashes() {
     echo -ne "\r\033[K"
 }
 
-# Reads pnpm.yaml
-# Outputs pseudo-package-lock
+# Function: transform_pnpm_yaml
+# Purpose: Convert pnpm-lock.yaml to pseudo-package-lock.json format for parsing
+# Args: $1 = packages_file (path to pnpm-lock.yaml)
+# Modifies: None
+# Returns: Outputs JSON to stdout with packages structure compatible with package-lock parser
 transform_pnpm_yaml() {
     declare -a path
     packages_file=$1
@@ -255,6 +326,11 @@ transform_pnpm_yaml() {
     echo "}"
 }
 
+# Function: semverParseInto
+# Purpose: Parse semantic version string into major, minor, patch, and special components
+# Args: $1 = version_string, $2 = major_var, $3 = minor_var, $4 = patch_var, $5 = special_var
+# Modifies: Sets variables named by $2-$5 using eval
+# Returns: Populates variables with parsed version components
 # Origin: https://github.com/cloudflare/semver_bash/blob/6cc9ce10/semver.sh
 semverParseInto() {
   local RE='[^0-9]*\([0-9]*\)[.]\([0-9]*\)[.]\([0-9]*\)\([0-9A-Za-z-]*\)'
@@ -268,23 +344,12 @@ semverParseInto() {
   eval $5=$(echo $1 | sed -e "s/$RE/\4/")
 }
 
-# Checks if test_version could match test_pattern
-# Multi-version patterns are split on '||', so "1.1.0 || 1.2.0" checks for both "1.1.0" and "1.2.0"
-# These match
-#   subject  pattern
-#   "1.1.2"  "*"
-#   "1.1.2"  "1.1.2"
-#   "1.1.2"  "~1.1.0"
-#   "1.1.2"  "^1.0.0"
-# These DO NOT match
-#   subject  pattern
-#   "1.1.2"  "1.1.1"
-#   "1.1.2"  "~1.1.3"
-#   "1.1.2"  "~1.2.0"
-#   "1.1.2"  "^1.1.3"
-#   "1.1.2"  "^1.2.0"
-#   "1.1.2"  "^2.0.0"
-#   "1.1.2"  "^0.0.0"
+# Function: semver_match
+# Purpose: Check if version matches semver pattern with caret (^), tilde (~), or exact matching
+# Args: $1 = test_subject (version to test), $2 = test_pattern (pattern like "^1.0.0" or "~1.1.0")
+# Modifies: None
+# Returns: 0 for match, 1 for no match (supports || for multi-pattern matching)
+# Examples: "1.1.2" matches "^1.0.0", "~1.1.0", "*" but not "^2.0.0" or "~1.2.0"
 semver_match() {
     local test_subject=$1
     local test_pattern=$2
@@ -346,12 +411,17 @@ semver_match() {
     return 1;
 }
 
-# Check package.json files for compromised packages
+# Function: check_packages
+# Purpose: Scan package.json files for compromised packages and suspicious namespaces
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: COMPROMISED_FOUND, SUSPICIOUS_FOUND, NAMESPACE_WARNINGS (global arrays)
+# Returns: Populates arrays with matches using exact and semver pattern matching
 check_packages() {
     local scan_dir=$1
 
     local filesCount
-    filesCount=$(($(find "$scan_dir" -name "package.json" | wc -l 2>/dev/null)))
+    filesCount=$(count_files "$scan_dir" -name "package.json")
+    filesCount=$((filesCount))
 
     print_status "$BLUE" "🔍 Checking $filesCount package.json files for compromised packages..."
 
@@ -374,8 +444,25 @@ check_packages() {
                     # Exact match, certainly compromised
                     COMPROMISED_FOUND+=("$package_file:$package_name@$package_version")
                 elif semver_match "${malicious_version}" "${package_version}"; then
-                    # Semver pattern match, /maybe/ compromised
-                    SUSPICIOUS_FOUND+=("$package_file:$package_name@$package_version")
+                    # Semver pattern match - check lockfile for actual installed version
+                    local package_dir
+                    package_dir=$(dirname "$package_file")
+                    local actual_version
+                    actual_version=$(get_lockfile_version "$package_name" "$package_dir" "$scan_dir")
+
+                    if [[ -n "$actual_version" ]]; then
+                        # Found actual version in lockfile
+                        if [[ "$actual_version" == "$malicious_version" ]]; then
+                            # Actual installed version is compromised
+                            COMPROMISED_FOUND+=("$package_file:$package_name@$actual_version")
+                        else
+                            # Lockfile has safe version but package.json range could update to compromised
+                            LOCKFILE_SAFE_VERSIONS+=("$package_file:$package_name@$package_version (locked to $actual_version - safe)")
+                        fi
+                    else
+                        # No lockfile or package not found - potential risk on install/update
+                        SUSPICIOUS_FOUND+=("$package_file:$package_name@$package_version")
+                    fi
                 fi
             done
         done < <(awk '/"dependencies":|"devDependencies":/{flag=1;next}/}/{flag=0}flag' "${package_file}")
@@ -388,13 +475,17 @@ check_packages() {
         done
 
         filesChecked=$((filesChecked+1))
-        echo -ne "\r\033[K$filesChecked / $filesCount checked ($((filesChecked*100/filesCount)) %)"
+        show_progress "$filesChecked" "$filesCount"
 
     done < <(find "$scan_dir" -name "package.json" -type f -print0 2>/dev/null)
     echo -ne "\r\033[K"
 }
 
-# Check for suspicious postinstall hooks
+# Function: check_postinstall_hooks
+# Purpose: Detect suspicious postinstall scripts that may execute malicious code
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: POSTINSTALL_HOOKS (global array)
+# Returns: Populates POSTINSTALL_HOOKS array with package.json files containing hooks
 check_postinstall_hooks() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for suspicious postinstall hooks..."
@@ -415,7 +506,11 @@ check_postinstall_hooks() {
     done < <(find "$scan_dir" -name "package.json" -print0 2>/dev/null)
 }
 
-# Check for suspicious content patterns
+# Function: check_content
+# Purpose: Search for suspicious content patterns like webhook.site and malicious endpoints
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: SUSPICIOUS_CONTENT (global array)
+# Returns: Populates SUSPICIOUS_CONTENT array with files containing suspicious patterns
 check_content() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for suspicious content patterns..."
@@ -433,7 +528,11 @@ check_content() {
     done < <(find "$scan_dir" -type f \( -name "*.js" -o -name "*.ts" -o -name "*.json" -o -name "*.yml" -o -name "*.yaml" \) -print0 2>/dev/null)
 }
 
-# Check for cryptocurrency theft patterns (Chalk/Debug attack Sept 8, 2025)
+# Function: check_crypto_theft_patterns
+# Purpose: Detect cryptocurrency theft patterns from the Chalk/Debug attack (Sept 8, 2025)
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: CRYPTO_PATTERNS, HIGH_RISK_CRYPTO (global arrays)
+# Returns: Populates arrays with wallet hijacking, XMLHttpRequest tampering, and attacker indicators
 check_crypto_theft_patterns() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for cryptocurrency theft patterns..."
@@ -446,9 +545,24 @@ check_crypto_theft_patterns() {
             fi
         fi
 
-        # Check for XMLHttpRequest hijacking
+        # Check for XMLHttpRequest hijacking with context-aware detection
         if grep -q "XMLHttpRequest\.prototype\.send" "$file" 2>/dev/null; then
-            CRYPTO_PATTERNS+=("$file:XMLHttpRequest prototype modification detected")
+            # Check if it's in a known legitimate framework path
+            if [[ "$file" == *"/react-native/Libraries/Network/"* ]] || [[ "$file" == *"/next/dist/compiled/"* ]]; then
+                # Check if there are also crypto patterns in the same file
+                if grep -q -E "0x[a-fA-F0-9]{40}|checkethereumw|runmask|webhook\.site|npmjs\.help" "$file" 2>/dev/null; then
+                    CRYPTO_PATTERNS+=("$file:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK")
+                else
+                    CRYPTO_PATTERNS+=("$file:XMLHttpRequest prototype modification detected in framework code - LOW RISK")
+                fi
+            else
+                # Check if there are also crypto patterns in the same file
+                if grep -q -E "0x[a-fA-F0-9]{40}|checkethereumw|runmask|webhook\.site|npmjs\.help" "$file" 2>/dev/null; then
+                    CRYPTO_PATTERNS+=("$file:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK")
+                else
+                    CRYPTO_PATTERNS+=("$file:XMLHttpRequest prototype modification detected - MEDIUM RISK")
+                fi
+            fi
         fi
 
         # Check for specific malicious functions from chalk/debug attack
@@ -478,7 +592,11 @@ check_crypto_theft_patterns() {
     done < <(find "$scan_dir" -type f \( -name "*.js" -o -name "*.ts" -o -name "*.json" \) -print0 2>/dev/null)
 }
 
-# Check for shai-hulud git branches
+# Function: check_git_branches
+# Purpose: Search for suspicious git branches containing "shai-hulud" in their names
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: GIT_BRANCHES (global array)
+# Returns: Populates GIT_BRANCHES array with branch names and commit hashes
 check_git_branches() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for suspicious git branches..."
@@ -499,7 +617,11 @@ check_git_branches() {
     done < <(find "$scan_dir" -name ".git" -type d -print0 2>/dev/null)
 }
 
-# Helper function to determine file context
+# Function: get_file_context
+# Purpose: Classify file context for risk assessment (node_modules, source, build, etc.)
+# Args: $1 = file_path (path to file)
+# Modifies: None
+# Returns: Echoes context string (node_modules, documentation, type_definitions, build_output, configuration, source_code)
 get_file_context() {
     local file_path=$1
 
@@ -536,7 +658,11 @@ get_file_context() {
     echo "source_code"
 }
 
-# Helper function to check for legitimate patterns
+# Function: is_legitimate_pattern
+# Purpose: Identify legitimate framework/build tool patterns to reduce false positives
+# Args: $1 = file_path, $2 = content_sample (text snippet from file)
+# Modifies: None
+# Returns: 0 for legitimate, 1 for potentially suspicious
 is_legitimate_pattern() {
     local file_path=$1
     local content_sample="$2"
@@ -559,7 +685,109 @@ is_legitimate_pattern() {
     return 1  # potentially suspicious
 }
 
-# Check for Trufflehog activity and secret scanning with context awareness
+# Function: get_lockfile_version
+# Purpose: Extract actual installed version from lockfile for a specific package
+# Args: $1 = package_name, $2 = package_json_dir (directory containing package.json), $3 = scan_boundary (original scan directory)
+# Modifies: None
+# Returns: Echoes installed version or empty string if not found
+get_lockfile_version() {
+    local package_name="$1"
+    local package_dir="$2"
+    local scan_boundary="$3"
+
+    # Search upward for lockfiles (supports packages in node_modules subdirectories)
+    local current_dir="$package_dir"
+
+    # Traverse up the directory tree until we find a lockfile, reach root, or hit scan boundary
+    while [[ "$current_dir" != "/" && "$current_dir" != "." && -n "$current_dir" ]]; do
+        # SECURITY: Don't search above the original scan directory boundary
+        if [[ ! "$current_dir/" =~ ^"$scan_boundary"/ && "$current_dir" != "$scan_boundary" ]]; then
+            break
+        fi
+        # Check for package-lock.json first (most common)
+        if [[ -f "$current_dir/package-lock.json" ]]; then
+            # Use the existing logic from check_package_integrity for block-based parsing
+            local found_version
+            found_version=$(awk -v pkg="node_modules/$package_name" '
+                $0 ~ "\"" pkg "\":" { in_block=1; brace_count=1 }
+                in_block && /\{/ && !($0 ~ "\"" pkg "\":") { brace_count++ }
+                in_block && /\}/ {
+                    brace_count--
+                    if (brace_count <= 0) { in_block=0 }
+                }
+                in_block && /\s*"version":/ {
+                    # Extract version value between quotes
+                    split($0, parts, "\"")
+                    for (i in parts) {
+                        if (parts[i] ~ /^[0-9]/) {
+                            print parts[i]
+                            exit
+                        }
+                    }
+                }
+            ' "$current_dir/package-lock.json" 2>/dev/null)
+
+            if [[ -n "$found_version" ]]; then
+                echo "$found_version"
+                return
+            fi
+        fi
+
+        # Check for yarn.lock
+        if [[ -f "$current_dir/yarn.lock" ]]; then
+            # Yarn.lock format: package-name@version:
+            local found_version
+            found_version=$(grep "^\"\\?$package_name@" "$current_dir/yarn.lock" 2>/dev/null | head -1 | sed 's/.*@\([^"]*\).*/\1/' 2>/dev/null)
+            if [[ -n "$found_version" ]]; then
+                echo "$found_version"
+                return
+            fi
+        fi
+
+        # Check for pnpm-lock.yaml
+        if [[ -f "$current_dir/pnpm-lock.yaml" ]]; then
+            # Use transform_pnpm_yaml and then parse like package-lock.json
+            local temp_lockfile
+            temp_lockfile=$(mktemp "${TMPDIR:-/tmp}/pnpm-parse.XXXXXXXX")
+            TEMP_FILES+=("$temp_lockfile")
+
+            transform_pnpm_yaml "$current_dir/pnpm-lock.yaml" > "$temp_lockfile" 2>/dev/null
+
+            local found_version
+            found_version=$(awk -v pkg="$package_name" '
+                $0 ~ "\"" pkg "\"" { in_block=1; brace_count=1 }
+                in_block && /\{/ && !($0 ~ "\"" pkg "\"") { brace_count++ }
+                in_block && /\}/ {
+                    brace_count--
+                    if (brace_count <= 0) { in_block=0 }
+                }
+                in_block && /\s*"version":/ {
+                    gsub(/.*"version":\s*"/, "")
+                    gsub(/".*/, "")
+                    print $0
+                    exit
+                }
+            ' "$temp_lockfile" 2>/dev/null)
+
+            if [[ -n "$found_version" ]]; then
+                echo "$found_version"
+                return
+            fi
+        fi
+
+        # Move to parent directory
+        current_dir=$(dirname "$current_dir")
+    done
+
+    # No lockfile or package not found
+    echo ""
+}
+
+# Function: check_trufflehog_activity
+# Purpose: Detect Trufflehog secret scanning activity with context-aware risk assessment
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: TRUFFLEHOG_ACTIVITY (global array)
+# Returns: Populates TRUFFLEHOG_ACTIVITY array with risk level (HIGH/MEDIUM/LOW) prefixes
 check_trufflehog_activity() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for Trufflehog activity and secret scanning..."
@@ -662,7 +890,11 @@ check_trufflehog_activity() {
     done < <(find "$scan_dir" -type f \( -name "*.js" -o -name "*.py" -o -name "*.sh" -o -name "*.json" \) -print0 2>/dev/null)
 }
 
-# Check for Shai-Hulud repositories and migration patterns
+# Function: check_shai_hulud_repos
+# Purpose: Detect Shai-Hulud worm repositories and malicious migration patterns
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: SHAI_HULUD_REPOS (global array)
+# Returns: Populates SHAI_HULUD_REPOS array with repository patterns and migration indicators
 check_shai_hulud_repos() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking for Shai-Hulud repositories and migration patterns..."
@@ -701,7 +933,11 @@ check_shai_hulud_repos() {
     done < <(find "$scan_dir" -name ".git" -type d -print0 2>/dev/null)
 }
 
-# Check package-lock.json and yarn.lock files for integrity issues
+# Function: check_package_integrity
+# Purpose: Verify package lock files for compromised packages and version integrity
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: INTEGRITY_ISSUES (global array)
+# Returns: Populates INTEGRITY_ISSUES with compromised packages found in lockfiles
 check_package_integrity() {
     local scan_dir=$1
     print_status "$BLUE" "🔍 Checking package lock files for integrity issues..."
@@ -711,11 +947,12 @@ check_package_integrity() {
         if [[ -f "$lockfile" && -r "$lockfile" ]]; then
 
             # Transform pnpm-lock.yaml into pseudo-package-lock
-            org_file=$lockfile
-            if [[ "$(basename $org_file)" == "pnpm-lock.yaml" ]]; then
-                org_file=$lockfile
-                lockfile=$(mktemp lockfile.XXXXXXXX)
-                transform_pnpm_yaml $org_file > $lockfile
+            org_file="$lockfile"
+            if [[ "$(basename "$org_file")" == "pnpm-lock.yaml" ]]; then
+                org_file="$lockfile"
+                lockfile=$(mktemp "${TMPDIR:-/tmp}/lockfile.XXXXXXXX")
+                TEMP_FILES+=("$lockfile")
+                transform_pnpm_yaml "$org_file" > "$lockfile"
             fi
 
             # Look for compromised packages in lockfiles
@@ -723,12 +960,40 @@ check_package_integrity() {
                 local package_name="${package_info%:*}"
                 local malicious_version="${package_info#*:}"
 
-                if grep -q "\"$package_name\"" "$lockfile" 2>/dev/null; then
-                    local found_version
-                    found_version=$(grep -A5 "\"$package_name\"" "$lockfile" 2>/dev/null | grep '"version":' 2>/dev/null | head -1 2>/dev/null | grep -o '"[0-9]\+\.[0-9]\+\.[0-9]\+"' 2>/dev/null | tr -d '"' 2>/dev/null) || true
-                    if [[ -n "$found_version" && "$found_version" == "$malicious_version" ]]; then
-                        INTEGRITY_ISSUES+=("$org_file:Compromised package in lockfile: $package_name@$malicious_version")
-                    fi
+                # Look for package-specific blocks to avoid version misattribution
+                local found_version=""
+
+                # Try to find the package in node_modules structure (most accurate for package-lock.json)
+                if grep -q "\"node_modules/$package_name\"" "$lockfile" 2>/dev/null; then
+                    # Extract version from within the specific package block
+                    found_version=$(awk -v pkg="node_modules/$package_name" '
+                        $0 ~ "\"" pkg "\"" { in_block=1; brace_count=1 }
+                        in_block && /\{/ && !($0 ~ "\"" pkg "\"") { brace_count++ }
+                        in_block && /\}/ {
+                            brace_count--
+                            if (brace_count <= 0) { in_block=0 }
+                        }
+                        in_block && /\s*"version":/ {
+                            gsub(/.*"version"[ \t]*:[ \t]*"/, "", $0)
+                            gsub(/".*/, "", $0)
+                            print $0
+                            exit
+                        }
+                    ' "$lockfile" 2>/dev/null) || true
+
+                # Fallback: for older lockfile formats without node_modules structure
+                # Only look for exact version matches on the same line
+                elif grep -q "\"$package_name\".*:.*\"[0-9]" "$lockfile" 2>/dev/null; then
+                    # Extract version from same line (for simple dependency format)
+                    found_version=$(grep "\"$package_name\".*:.*\"[0-9]" "$lockfile" 2>/dev/null | head -1 | awk -F':' '{
+                        gsub(/.*"/, "", $2)
+                        gsub(/".*/, "", $2)
+                        print $2
+                    }' 2>/dev/null) || true
+                fi
+
+                if [[ -n "$found_version" && "$found_version" == "$malicious_version" ]]; then
+                    INTEGRITY_ISSUES+=("$org_file:Compromised package in lockfile: $package_name@$malicious_version")
                 fi
             done
 
@@ -751,16 +1016,20 @@ check_package_integrity() {
             fi
 
             # Revert virtual package-lock
-            if [[ "$(basename $org_file)" == "pnpm-lock.yaml" ]]; then
-                rm $lockfile
-                lockfile=$org_file
+            if [[ "$(basename "$org_file")" == "pnpm-lock.yaml" ]]; then
+                rm "$lockfile"
+                lockfile="$org_file"
             fi
 
         fi
     done < <(find "$scan_dir" \( -name "pnpm-lock.yaml" -o -name "yarn.lock" -o -name "package-lock.json" \) -print0 2>/dev/null)
 }
 
-# Check for typosquatting and homoglyph attacks
+# Function: check_typosquatting
+# Purpose: Detect typosquatting and homoglyph attacks in package dependencies
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: TYPOSQUATTING_WARNINGS (global array)
+# Returns: Populates TYPOSQUATTING_WARNINGS with Unicode chars, confusables, and similar names
 check_typosquatting() {
     local scan_dir=$1
 
@@ -771,6 +1040,20 @@ check_typosquatting() {
         "commander" "inquirer" "yargs" "request" "moment" "underscore"
         "jquery" "bootstrap" "socket.io" "redis" "mongoose" "passport"
     )
+
+    # Track packages already warned about to prevent duplicates
+    local warned_packages=()
+
+    # Helper function to check if package already warned about
+    already_warned() {
+        local pkg="$1"
+        local file="$2"
+        local key="$file:$pkg"
+        for warned in "${warned_packages[@]}"; do
+            [[ "$warned" == "$key" ]] && return 0
+        done
+        return 1
+    }
 
     # Cyrillic and Unicode lookalike characters for common ASCII characters
     # Using od to detect non-ASCII characters in package names
@@ -787,7 +1070,7 @@ check_typosquatting() {
                 in_deps && /^[[:space:]]*"[^"]+":/ {
                     gsub(/^[[:space:]]*"/, "", $0)
                     gsub(/".*$/, "", $0)
-                    if ($0 ~ /^[a-zA-Z@][a-zA-Z0-9@\/\._-]*$/) print $0
+                    if (length($0) > 1) print $0
                 }
             ' "$package_file" | sort -u)
 
@@ -807,7 +1090,10 @@ check_typosquatting() {
 
                 if [[ $has_unicode -eq 1 ]]; then
                     # Simplified check - if it contains non-standard characters, flag it
-                    TYPOSQUATTING_WARNINGS+=("$package_file:Potential Unicode/homoglyph characters in package: $package_name")
+                    if ! already_warned "$package_name" "$package_file"; then
+                        TYPOSQUATTING_WARNINGS+=("$package_file:Potential Unicode/homoglyph characters in package: $package_name")
+                        warned_packages+=("$package_file:$package_name")
+                    fi
                 fi
 
                 # Check for confusable characters (common typosquatting patterns)
@@ -820,7 +1106,10 @@ check_typosquatting() {
                     local pattern="${confusable%:*}"
                     local target="${confusable#*:}"
                     if echo "$package_name" | grep -q "$pattern"; then
-                        TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting pattern '$pattern' in package: $package_name")
+                        if ! already_warned "$package_name" "$package_file"; then
+                            TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting pattern '$pattern' in package: $package_name")
+                            warned_packages+=("$package_file:$package_name")
+                        fi
                     fi
                 done
 
@@ -848,7 +1137,10 @@ check_typosquatting() {
                         if [[ $diff_count -eq 1 ]]; then
                             # Additional check - avoid common legitimate variations
                             if [[ "$package_name" != *"-"* && "$popular" != *"-"* ]]; then
-                                TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (1 character difference)")
+                                if ! already_warned "$package_name" "$package_file"; then
+                                    TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (1 character difference)")
+                                    warned_packages+=("$package_file:$package_name")
+                                fi
                             fi
                         fi
                     fi
@@ -859,7 +1151,10 @@ check_typosquatting() {
                         for ((i=0; i<=${#popular}; i++)); do
                             local test_name="${popular:0:$i}${popular:$((i+1))}"
                             if [[ "$package_name" == "$test_name" ]]; then
-                                TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (missing character)")
+                                if ! already_warned "$package_name" "$package_file"; then
+                                    TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (missing character)")
+                                    warned_packages+=("$package_file:$package_name")
+                                fi
                                 break
                             fi
                         done
@@ -870,7 +1165,10 @@ check_typosquatting() {
                         for ((i=0; i<=${#package_name}; i++)); do
                             local test_name="${package_name:0:$i}${package_name:$((i+1))}"
                             if [[ "$test_name" == "$popular" ]]; then
-                                TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (extra character)")
+                                if ! already_warned "$package_name" "$package_file"; then
+                                    TYPOSQUATTING_WARNINGS+=("$package_file:Potential typosquatting of '$popular': $package_name (extra character)")
+                                    warned_packages+=("$package_file:$package_name")
+                                fi
                                 break
                             fi
                         done
@@ -902,7 +1200,10 @@ check_typosquatting() {
                                 done
 
                                 if [[ $ns_diff -ge 1 && $ns_diff -le 2 ]]; then
-                                    TYPOSQUATTING_WARNINGS+=("$package_file:Suspicious namespace variation: $namespace (similar to $suspicious)")
+                                    if ! already_warned "$package_name" "$package_file"; then
+                                        TYPOSQUATTING_WARNINGS+=("$package_file:Suspicious namespace variation: $namespace (similar to $suspicious)")
+                                        warned_packages+=("$package_file:$package_name")
+                                    fi
                                 fi
                             fi
                         fi
@@ -914,7 +1215,11 @@ check_typosquatting() {
     done < <(find "$scan_dir" -name "package.json" -print0 2>/dev/null)
 }
 
-# Check for network exfiltration patterns
+# Function: check_network_exfiltration
+# Purpose: Detect network exfiltration patterns including suspicious domains and IPs
+# Args: $1 = scan_dir (directory to scan)
+# Modifies: NETWORK_EXFILTRATION_WARNINGS (global array)
+# Returns: Populates NETWORK_EXFILTRATION_WARNINGS with hardcoded IPs and suspicious domains
 check_network_exfiltration() {
     local scan_dir=$1
 
@@ -959,14 +1264,14 @@ check_network_exfiltration() {
             if [[ "$file" != *"package-lock.json"* && "$file" != *"yarn.lock"* && "$file" != *"/vendor/"* && "$file" != *"/node_modules/"* ]]; then
                 for domain in "${suspicious_domains[@]}"; do
                     # Use word boundaries and URL patterns to avoid false positives like "timeZone" containing "t.me"
-                    if grep -q "https\?://[^[:space:]]*$domain\|[[:space:]]$domain[[:space:/]\"\']" "$file" 2>/dev/null; then
+                    if grep -qE "https?://[^[:space:]]*$domain|[[:space:]]$domain[[:space:]/\"\']" "$file" 2>/dev/null; then
                         # Additional check - make sure it's not just a comment or documentation
                         local suspicious_usage
-                        suspicious_usage=$(grep "https\?://[^[:space:]]*$domain\|[[:space:]]$domain[[:space:/]\"\']" "$file" 2>/dev/null | grep -v "^[[:space:]]*#\|^[[:space:]]*//" 2>/dev/null | head -1 2>/dev/null) || true
+                        suspicious_usage=$(grep -E "https?://[^[:space:]]*$domain|[[:space:]]$domain[[:space:]/\"\']" "$file" 2>/dev/null | grep -vE "^[[:space:]]*#|^[[:space:]]*//" 2>/dev/null | head -1 2>/dev/null) || true
                         if [[ -n "$suspicious_usage" ]]; then
                             # Get line number and context
                             local line_info
-                            line_info=$(grep -n "https\?://[^[:space:]]*$domain\|[[:space:]]$domain[[:space:/]\"\']" "$file" 2>/dev/null | grep -v "^[[:space:]]*#\|^[[:space:]]*//" 2>/dev/null | head -1 2>/dev/null) || true
+                            line_info=$(grep -nE "https?://[^[:space:]]*$domain|[[:space:]]$domain[[:space:]/\"\']" "$file" 2>/dev/null | grep -vE "^[[:space:]]*#|^[[:space:]]*//" 2>/dev/null | head -1 2>/dev/null) || true
                             local line_num
                             line_num=$(echo "$line_info" | cut -d: -f1 2>/dev/null) || true
 
@@ -1070,7 +1375,11 @@ check_network_exfiltration() {
     done < <(find "$scan_dir" \( -name "*.js" -o -name "*.ts" -o -name "*.json" -o -name "*.mjs" \) -print0 2>/dev/null)
 }
 
-# Generate final report
+# Function: generate_report
+# Purpose: Generate comprehensive security report with risk stratification and findings
+# Args: $1 = paranoid_mode ("true" or "false" for extended checks)
+# Modifies: None (reads all global finding arrays)
+# Returns: Outputs formatted report to stdout with HIGH/MEDIUM/LOW risk sections
 generate_report() {
     local paranoid_mode="$1"
     echo
@@ -1141,6 +1450,20 @@ generate_report() {
         echo
     fi
 
+    # Report lockfile-safe packages
+    if [[ ${#LOCKFILE_SAFE_VERSIONS[@]} -gt 0 ]]; then
+        print_status "$BLUE" "ℹ️  LOW RISK: Packages with safe lockfile versions:"
+        for entry in "${LOCKFILE_SAFE_VERSIONS[@]}"; do
+            local file_path="${entry%:*}"
+            local package_info="${entry#*:}"
+            echo "   - Package: $package_info"
+            echo "     Found in: $file_path"
+        done
+        echo -e "   ${BLUE}NOTE: These package.json ranges could match compromised versions, but lockfiles pin to safe versions.${NC}"
+        echo -e "   ${BLUE}Your current installation is safe. Avoid running 'npm update' without reviewing changes.${NC}"
+        echo
+    fi
+
     # Report suspicious content
     if [[ ${#SUSPICIOUS_CONTENT[@]} -gt 0 ]]; then
         print_status "$YELLOW" "⚠️  MEDIUM RISK: Suspicious content patterns:"
@@ -1158,13 +1481,16 @@ generate_report() {
 
     # Report cryptocurrency theft patterns
     if [[ ${#CRYPTO_PATTERNS[@]} -gt 0 ]]; then
-        # Separate HIGH RISK and MEDIUM RISK crypto patterns
+        # Separate HIGH RISK, MEDIUM RISK, and LOW RISK crypto patterns
         local crypto_high=()
         local crypto_medium=()
+        local crypto_low=()
 
         for entry in "${CRYPTO_PATTERNS[@]}"; do
-            if [[ "$entry" == *"HIGH RISK"* ]] || [[ "$entry" == *"Known attacker wallet"* ]] || [[ "$entry" == *"XMLHttpRequest prototype"* ]]; then
+            if [[ "$entry" == *"HIGH RISK"* ]] || [[ "$entry" == *"Known attacker wallet"* ]]; then
                 crypto_high+=("$entry")
+            elif [[ "$entry" == *"LOW RISK"* ]]; then
+                crypto_low+=("$entry")
             else
                 crypto_medium+=("$entry")
             fi
@@ -1193,6 +1519,11 @@ generate_report() {
             echo -e "   ${YELLOW}Manual review recommended to determine if they are malicious.${NC}"
             echo
         fi
+
+        # Add LOW RISK crypto patterns to global LOW_RISK_FINDINGS for later reporting
+        for entry in "${crypto_low[@]}"; do
+            LOW_RISK_FINDINGS+=("Crypto pattern: ${entry}")
+        done
     fi
 
     # Report git branches
@@ -1433,7 +1764,11 @@ generate_report() {
     print_status "$BLUE" "=============================================="
 }
 
-# Main execution
+# Function: main
+# Purpose: Main entry point - parse arguments, load data, run all checks, generate report
+# Args: Command line arguments (--paranoid, --help, --parallelism N, directory_path)
+# Modifies: All global arrays via detection functions
+# Returns: Exit code 0 for clean, 1 for high-risk findings, 2 for medium-risk findings
 main() {
     local paranoid_mode=false
     local scan_dir=""

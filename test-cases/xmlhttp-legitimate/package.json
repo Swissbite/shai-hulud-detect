@@ -1,0 +1,12 @@
+{
+  "name": "xmlhttp-legitimate-test",
+  "version": "1.0.0",
+  "description": "Test case for legitimate XMLHttpRequest modifications in framework code",
+  "dependencies": {
+    "react": "^18.0.0",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "typescript": "^4.9.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "xmlhttp-malicious-test",
+  "version": "1.0.0",
+  "description": "Test case for malicious XMLHttpRequest modifications with crypto patterns",
+  "dependencies": {
+    "react": "^18.0.0",
+    "lodash": "^4.17.21"
+  }
+}

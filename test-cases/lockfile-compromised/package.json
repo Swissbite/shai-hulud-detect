@@ -1,0 +1,8 @@
+{
+  "name": "lockfile-compromised-test",
+  "version": "1.0.0",
+  "description": "Test case for actual compromised packages in lockfile",
+  "dependencies": {
+    "color-convert": "3.1.1"
+  }
+}

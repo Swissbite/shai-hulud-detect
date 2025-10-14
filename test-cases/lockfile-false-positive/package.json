@@ -1,0 +1,9 @@
+{
+  "name": "lockfile-false-positive-test",
+  "version": "1.0.0",
+  "description": "Test case for lockfile false positives - color-convert@1.9.3 should not be flagged as 3.1.1",
+  "dependencies": {
+    "some-package": "^3.1.1",
+    "color-convert": "^1.9.3"
+  }
+}

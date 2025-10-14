@@ -1,0 +1,13 @@
+{
+  "name": "lockfile-safe-test",
+  "version": "1.0.0",
+  "description": "Test case for Issue #42 - packages with semver ranges that could match compromised versions but are locked to safe versions",
+  "dependencies": {
+    "debug": "^4.0.1",
+    "error-ex": "^1.2.0",
+    "lodash": "^4.17.0"
+  },
+  "devDependencies": {
+    "jest": "^27.0.0"
+  }
+}

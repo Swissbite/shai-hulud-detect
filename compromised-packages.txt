@@ -637,24 +637,15 @@ yoo-styles:6.0.326
 
 
 # @ctrl packages
-@ctrl/ngx-codemirror:7.0.1
 @ctrl/ngx-codemirror:7.0.2
-@ctrl/ngx-csv:6.0.1
 @ctrl/ngx-csv:6.0.2
-@ctrl/ngx-emoji-mart:9.2.1
 @ctrl/ngx-emoji-mart:9.2.2
-@ctrl/ngx-rightclick:4.0.1
 @ctrl/ngx-rightclick:4.0.2
-@ctrl/qbittorrent:9.7.1
 @ctrl/qbittorrent:9.7.2
-@ctrl/react-adsense:2.0.1
 @ctrl/react-adsense:2.0.2
-@ctrl/shared-torrent:6.3.1
 @ctrl/shared-torrent:6.3.2
-@ctrl/torrent-file:4.1.1
 @ctrl/torrent-file:4.1.2
 @ctrl/transmission:7.3.1
-@ctrl/ts-base32:4.0.1
 @ctrl/ts-base32:4.0.2
 
 # @nativescript-community packages
@@ -673,23 +664,15 @@ yoo-styles:6.0.326
 
 # Standalone packages
 another-shai:1.0.1
-encounter-playground:0.0.2
-encounter-playground:0.0.3
-encounter-playground:0.0.4
 encounter-playground:0.0.5
-ng2-file-upload:7.0.2
 ng2-file-upload:7.0.3
-ngx-color:10.0.1
 ngx-color:10.0.2
 ngx-trend:8.0.1
-react-complaint-image:0.0.32
 react-complaint-image:0.0.35
-react-jsonschema-form-conditionals:0.3.18
 react-jsonschema-form-conditionals:0.3.21
 react-jsonschema-form-extras:1.0.4
 rxnt-authentication:0.0.6
 rxnt-healthchecks-nestjs:1.0.5
 rxnt-kue:1.0.7
-eslint-config-teselagen:6.1.7
 swc-plugin-component-annotate:1.9.2
 ts-gaussian:3.0.6

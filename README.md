@@ -10,32 +10,30 @@
 
 <img src="shai_hulu_detector.jpg" alt="sshd" width="80%" />
 
-A bash script to detect indicators of compromise from the September 2025 npm supply chain attacks, including the Shai-Hulud self-replicating worm and the chalk/debug crypto theft attack. This comprehensive detector covers 571+ compromised package versions across multiple attack campaigns, providing protection against the most severe JavaScript supply chain attacks to date.
+A Bash tool that helps you spot known traces of the September 2025 npm supply-chain attacks—including the Shai-Hulud self-replicating worm and the chalk/debug crypto-theft incident. It cross-checks 571+ confirmed bad package versions across multiple campaigns and checks for the most relevant red flags in your project.
 
 ## Overview
 
-This detector covers multiple npm supply chain attacks from September 2025:
+Covers multiple npm supply chain attacks from September 2025:
 
-### 🎯 **Chalk/Debug Crypto Theft Attack** (September 8, 2025)
+### **Chalk/Debug Crypto Theft Attack** (September 8, 2025)
 - **Scope**: 18+ packages with 2+ billion weekly downloads
 - **Attack**: Cryptocurrency wallet address replacement in browsers
 - **Duration**: ~2 hours before detection
 - **Packages**: chalk, debug, ansi-styles, color-*, supports-*, and others
 - **Method**: XMLHttpRequest hijacking to steal crypto transactions
 
-### 🐛 **Shai-Hulud Self-Replicating Worm** (September 14-16, 2025)
+### **Shai-Hulud Self-Replicating Worm** (September 14-16, 2025)
 - **Scope**: 517+ packages across multiple namespaces
 - **Attack**: Credential harvesting and self-propagation
 - **Method**: Uses Trufflehog to scan for secrets, publishes stolen data to GitHub
 - **Propagation**: Self-replicates using stolen npm tokens
 - **Packages**: @ctrl/*, @crowdstrike/*, @operato/*, and many others
 
-The script detects indicators from both attacks to provide comprehensive protection against these sophisticated supply chain compromises.
-
 ## Quick Start - Bash Version
 
 ```bash
-# Clone the repository (required for compromised package list)
+# Clone the repository
 git clone https://github.com/username/shai-hulud-detector.git
 cd shai-hulud-detector
 
@@ -89,31 +87,11 @@ chmod +x shai-hulud-detector.ts
 ### Low Risk Indicators
 - **Namespace warnings**: Packages from namespaces known to be affected (@ctrl, @crowdstrike, @art-ws, @ngx, @nativescript-community) but at safe versions
 
-## Compromised Packages Detected
-
-The script detects compromised packages from multiple September 2025 attacks. **Our current detection covers 571+ confirmed compromised packages** with specific version numbers, plus broader namespace detection for comprehensive protection.
-
 ### Package Detection Method
 
-The script loads compromised packages from an external file (`compromised-packages.txt`) which contains:
-- **571+ confirmed compromised package versions** with exact version numbers
+The script loads a list of the compromised packages from an external file (`compromised-packages.txt`) which contains:
+- **600+ confirmed compromised package versions** with exact version numbers
 - **11 affected namespaces** for broader detection of packages from compromised maintainer accounts
-
-### Key Compromised Packages Include
-- `@ctrl/tinycolor@4.1.1, 4.1.2` - Shai-Hulud attack vector (2M+ weekly downloads)
-- `chalk@5.6.1`, `debug@4.4.2` - Chalk/Debug crypto theft attack (2B+ weekly downloads)
-- `@art-ws/*` packages (16+ packages) - Art workspace utilities
-- `@crowdstrike/*` packages (25+ packages) - CrowdStrike-related packages
-- `@nativescript-community/*` packages (40+ packages) - NativeScript community tools
-- `ngx-bootstrap`, `angulartics2`, `koa2-swagger-ui` - Popular standalone packages
-
-### Affected Namespaces (Complete List)
-- `@ctrl/*` - Control utility packages
-- `@crowdstrike/*` - CrowdStrike-related packages
-- `@art-ws/*` - Art workspace packages
-- `@ngx/*` - Angular-related packages
-- `@nativescript-community/*` - NativeScript community packages
-- `@ahmedhfarag/*`, `@operato/*`, `@teselagen/*`, `@things-factory/*`, `@hestjs/*`, `@nstudio/*` - Additional affected namespaces
 
 ### Maintaining and Updating the Package List
 
@@ -143,16 +121,6 @@ Check these security advisories regularly for newly discovered compromised packa
 
 **Coverage Note**: Multiple September 2025 attacks affected 571+ packages total. Our detection aims to provide **comprehensive coverage** across both the Shai-Hulud worm (517+ packages) and Chalk/Debug crypto theft (26+ packages) attacks. Combined with namespace-based detection, this should provide excellent protection against these sophisticated supply chain compromises.
 
-## Latest Updates
-
-- **2025-09-24 v2.3.0**: **Semver Matching & Improved Warnings** - Merged PR #28 adding semver pattern matching to detect packages that could become compromised on update. Merged PR #27 for parallelized hash scanning with cross-platform support. Changed namespace warnings from MEDIUM to LOW risk to reduce false positives. Fixed test cases and added new test scenarios for semver matching and namespace warnings
-- **2025-09-21 v2.2.2**: **Progress Display & Cross-platform Support** - Merged PR #19 for real-time file scanning progress with percentage completion. Merged PR #26 adding comprehensive test cases for all 7 hash variants. Merged PR #25 for cross-platform file age detection. Added pnpm-lock.yaml support and enhanced error handling to prevent script hangs
-- **2025-09-19 v2.2.1**: **Missing Socket.dev Packages Added** - Added 34 additional compromised packages from Socket.dev analysis that were previously missed, including @ctrl packages (9), @nativescript-community packages (8), @rxap packages (2), and 15 standalone packages. Total coverage now includes all known compromised packages from multiple security sources
-- **2025-09-19 v2.2.0**: **Multi-Hash Detection** - Added detection for all 7 Shai-Hulud worm variants (V1-V7) using comprehensive hash analysis from Socket.dev research. Enhanced malicious file detection from single hash to complete worm evolution timeline covering September 14-16, 2025 attack campaign
-- **2025-09-19 v2.1.0**: **Enhanced Error Handling & pnpm Support** - Added robust error handling for grep pipelines to prevent script hangs (PR #13). Added pnpm-lock.yaml support with YAML-to-JSON transformation for full lockfile coverage. Improved reliability across different shell environments
-
-*For complete version history, see [CHANGELOG.md](CHANGELOG.md)*
-
 ### Core vs Paranoid Mode
 
 **Core Mode (Default)**
@@ -163,7 +131,7 @@ Check these security advisories regularly for newly discovered compromised packa
 **Paranoid Mode (`--paranoid`)**
 - Includes all core Shai-Hulud detection PLUS additional security checks
 - Adds typosquatting detection and network exfiltration pattern analysis
-- ⚠️ **Important**: Paranoid features are general security tools, not specific to Shai-Hulud
+- **Important**: Paranoid features are general security tools, not specific to Shai-Hulud
 - May produce more false positives from legitimate code
 - Useful for comprehensive security auditing
 
@@ -225,12 +193,67 @@ The repository includes test cases to validate the script:
 # Test legitimate crypto libraries (should show MEDIUM risk only)
 ./shai-hulud-detector.sh test-cases/legitimate-crypto
 
-# Test chalk/debug attack patterns (should show HIGH risk)
+# Test chalk/debug attack patterns (should show HIGH risk compromised packages + MEDIUM risk crypto patterns)
 ./shai-hulud-detector.sh test-cases/chalk-debug-attack
 
 # Test common crypto libraries (should not trigger HIGH risk false positives)
 ./shai-hulud-detector.sh test-cases/common-crypto-libs
+
+# Test legitimate XMLHttpRequest modifications (should show LOW risk only)
+./shai-hulud-detector.sh test-cases/xmlhttp-legitimate
+
+# Test malicious XMLHttpRequest with crypto patterns (should show HIGH risk crypto theft + MEDIUM risk XMLHttpRequest patterns)
+./shai-hulud-detector.sh test-cases/xmlhttp-malicious
+
+# Test lockfile false positive (should show no issues despite other package having compromised version)
+./shai-hulud-detector.sh test-cases/lockfile-false-positive
+
+# Test actual compromised package in lockfile (should show HIGH risk)
+./shai-hulud-detector.sh test-cases/lockfile-compromised
+
+# Test packages with safe lockfile versions (should show LOW risk with lockfile protection message)
+./shai-hulud-detector.sh test-cases/lockfile-safe-versions
+
+# Test mixed lockfile scenario (should show HIGH risk for compromised + LOW risk for safe)
+./shai-hulud-detector.sh test-cases/lockfile-comprehensive-test
+
+# Test packages without lockfile (should show MEDIUM risk for potential update risks)
+./shai-hulud-detector.sh test-cases/no-lockfile-test
+
+# Test typosquatting detection with paranoid mode (should show MEDIUM risk typosquatting warnings)
+./shai-hulud-detector.sh --paranoid test-cases/typosquatting-project
+
+# Test network exfiltration detection with paranoid mode (should show HIGH risk credential harvesting + MEDIUM risk network patterns)
+./shai-hulud-detector.sh --paranoid test-cases/network-exfiltration-project
+
+# Test clean project with paranoid mode (should show no issues - verifies no false positives)
+./shai-hulud-detector.sh --paranoid test-cases/clean-project
 ```
+
+### Paranoid Mode Testing
+
+The `--paranoid` flag enables additional security checks beyond Shai-Hulud-specific detection:
+
+- **Typosquatting Detection**: Identifies packages with names similar to popular packages (e.g., "raect" instead of "react", "lodsh" instead of "lodash")
+- **Network Exfiltration Patterns**: Detects suspicious domains (webhook.site, pastebin.com), hardcoded IP addresses, WebSocket connections to external endpoints
+- **Enhanced Security Auditing**: Useful for comprehensive project security reviews
+
+**Note**: Paranoid mode may produce more false positives from legitimate code patterns, so review findings carefully.
+
+### Lockfile-Aware Detection (v2.6.0+)
+
+The script now intelligently handles projects with lockfiles to reduce false positives:
+
+- **Lockfile Detection**: Automatically detects package-lock.json, yarn.lock, and pnpm-lock.yaml files
+- **Actual Version Checking**: When semver ranges could match compromised versions, checks the actual installed version from lockfiles
+- **Smart Risk Assessment**:
+  - **HIGH RISK**: Lockfile contains exact compromised version (immediate threat)
+  - **LOW RISK**: Lockfile contains safe version (protected by lockfile, but avoid updates)
+  - **MEDIUM RISK**: No lockfile present (potential update risk)
+
+**Example**: If your package.json has `debug@^4.0.1` (which could match compromised `debug@4.4.2`), but your lockfile pins to `debug@4.0.1`, you'll see a LOW RISK message explaining that your current installation is safe.
+
+This feature addresses Issue #42 and eliminates confusion for users with older projects that have established lockfiles.
 
 ## How it Works
 
@@ -279,8 +302,14 @@ Recent investigations have revealed a potential connection between the Shai-Hulu
 - **Additional Compromised Versions**: `tinycolor@4.1.1` and `tinycolor@4.1.2` have been identified as compromised
 - **New Package Targets**: `angulartics2` and `koa2-swagger-ui` packages have been added to the compromised list
 
-### Enhanced Detection Capabilities
+### Enhanced Detection Capabilities (v2.5.0)
 The script now includes:
+- **Fixed lockfile false positives**: Improved package version extraction to prevent incorrect flagging of safe packages (fixes issue #37)
+- **Robust lockfile parsing**: Uses block-based JSON parsing instead of proximity-based grep to accurately extract package versions
+- **Context-aware XMLHttpRequest detection**: Reduces false positives for legitimate framework code (React Native, Next.js)
+- **Improved risk stratification**: XMLHttpRequest modifications now properly classified based on context and crypto patterns
+- **Parallel processing optimization**: ~20% performance improvement with semver pattern matching
+- **Duplicate-free package database**: Cleaned 600+ unique compromised package entries
 - Repository migration pattern detection
 - Package-lock.json integrity verification
 - Context-aware Trufflehog detection to reduce false positives
@@ -309,7 +338,7 @@ The script now includes:
 
 ## Contributing
 
-We welcome contributions to improve the Shai-Hulud detector! The community's help is crucial for keeping pace with this evolving threat.
+We welcome contributions to improve any of the code, documentation, tests and packages covered. 
 
 ### How to Contribute
 
@@ -365,6 +394,10 @@ If you can't submit a PR, you can still help by reporting new compromised packag
 2. Include the package name, version, and source of information
 3. Provide links to security advisories or reports
 4. We'll review and add verified packages to the detection list
+
+## Release Notes
+
+For a complete list of changes and version history, see the [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

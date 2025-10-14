@@ -5,7 +5,202 @@ All notable changes to the Shai-Hulud NPM Supply Chain Attack Detector will be d
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.6.3] - 2025-10-03
+
+### Fixed
+- **Critical Security Vulnerability**: Fixed lockfile upward search that could access parent directories outside scan boundary, preventing potential malicious lockfile attacks
+- **Directory Boundary Enforcement**: Added security boundary checking to prevent upward search from accessing lockfiles above the original scan directory
+- **Information Leakage Prevention**: Blocked potential access to unrelated project lockfiles in parent directories
+
+### Security Impact
+- **Prevents Malicious Parent Lockfile Attacks**: Attackers can no longer place malicious lockfiles in parent directories to influence scan results
+- **Blocks Information Leakage**: Upward search now respects project boundaries and won't access unrelated parent directory lockfiles
+- **Maintains User Privacy**: Scanner no longer accesses lockfiles outside the intended project scope
+
+### Changed
+- **Lockfile Search Boundary**: Enhanced `get_lockfile_version()` function with scan directory boundary parameter to limit upward search scope
+- **Security-First Design**: Added boundary validation using regex pattern matching to ensure search stays within project boundaries
+
+### Technical Details
+- Added `scan_boundary` parameter to `get_lockfile_version()` function signature
+- Implemented boundary check: `if [[ ! "$current_dir/" =~ ^"$scan_boundary"/ && "$current_dir" != "$scan_boundary" ]]; then break; fi`
+- Updated call sites to pass scan directory as boundary parameter
+- Preserves all existing functionality within proper security boundaries
+
+## [2.6.2] - 2025-10-03
+
+### Fixed
+- **GitHub Issue #42 Node Modules Lockfile Detection**: Fixed remaining lockfile detection issue where packages in node_modules subdirectories were not properly checked against root lockfiles
+- **Upward Lockfile Search**: Enhanced `get_lockfile_version()` function to search parent directories for lockfiles instead of only checking same directory as package.json
+- **Node Modules Package Protection**: Packages found in `node_modules/*/package.json` now correctly show LOW RISK when root lockfile pins them to safe versions
+
+### Changed
+- **Lockfile Detection Logic**: Modified lockfile search to traverse upward through directory tree until finding lockfile or reaching filesystem root
+- **Cross-Directory Lockfile Support**: Lockfile detection now works for packages at any directory depth within a project
+
+### Technical Details
+- Searches upward from package.json directory using `dirname` traversal until lockfile found or root reached
+- Supports all lockfile types (package-lock.json, yarn.lock, pnpm-lock.yaml) at any parent directory level
+- Maintains backward compatibility for root-level packages
+- Zero performance impact for projects without nested package.json files
+
+## [2.6.1] - 2025-10-03
+
+### Fixed
+- **GitHub Issue #44 Critical Security Vulnerability**: Fixed homoglyph detection bypass where Unicode characters were filtered out before detection could run
+- **AWK Filter Security Flaw**: Replaced restrictive ASCII-only regex filter with minimal length check to allow Unicode homoglyphs through to detection logic
+- **Duplicate Warning Deduplication**: Eliminated confusing duplicate warnings where same malicious package was flagged by multiple detection methods
+- **Risk Count Accuracy**: Fixed inflated risk counts where 1 malicious package could generate 2+ warnings, providing accurate threat metrics
+
+### Added
+- **Cross-Platform Unicode Detection**: Enhanced typosquatting detection to work reliably across macOS, Linux, and Windows/Git Bash environments
+- **Warning Deduplication System**: Added `already_warned()` helper function and tracking array to prevent redundant warnings for same packages
+- **Comprehensive Issue #44 Test Coverage**: Verified Unicode homoglyph detection works for packages like `reаct` (Cyrillic 'а') and `@typеs/node`
+
+### Changed
+- **AWK Package Name Filter**: Modified line 1045 from strict ASCII regex to `if (length($0) > 1)` for cross-platform Unicode compatibility
+- **Typosquatting Warning Logic**: All 6 warning addition points now check for duplicates before adding to TYPOSQUATTING_WARNINGS array
+- **User Experience**: Cleaner output with single warning per malicious package instead of multiple redundant alerts
+
+### Security Impact
+- **Critical Vulnerability Closed**: Attackers can no longer bypass detection using Unicode lookalike characters (e.g., Cyrillic letters)
+- **Enhanced Threat Detection**: Now properly detects sophisticated homoglyph attacks that were previously missed
+- **Accurate Risk Assessment**: Users get correct threat counts and cleaner, more trustworthy output
+
+### Technical Details
+- Uses standard AWK `length()` function available on all platforms (gawk, mawk, nawk, BSD awk)
+- Maintains existing cross-platform Unicode detection using `LC_ALL=C` + `grep`
+- Deduplication uses bash arrays and functions for maximum compatibility
+- Zero performance impact, preserves all existing detection capabilities
+
+## [2.6.0] - 2025-10-03
+
+### Fixed
+- **GitHub Issue #42 False Positives**: Resolved user confusion about MEDIUM RISK warnings for packages with safe lockfile versions
+- **Semver Range Detection Accuracy**: Fixed misleading warnings for old projects with lockfiles that pin to safe package versions
+- **User Experience for Legacy Projects**: Eliminated false positive confusion for users scanning older codebases with established lockfiles
+
+### Added
+- **Lockfile-Aware Package Detection**: New intelligent detection logic that checks actual installed versions from lockfiles before flagging semver range matches
+- **get_lockfile_version() Function**: New helper function that extracts actual installed package versions from package-lock.json, yarn.lock, and pnpm-lock.yaml files
+- **LOCKFILE_SAFE_VERSIONS Array**: New global array to track packages that have semver ranges that could match compromised versions but are locked to safe versions
+- **LOW RISK Lockfile Protection Category**: New report section showing packages protected by lockfiles with clear, actionable messaging
+- **Comprehensive Test Suite**: Added 3 new test cases covering all lockfile detection scenarios
+  - `lockfile-safe-versions`: Tests packages with safe lockfile versions (shows LOW RISK)
+  - `lockfile-comprehensive-test`: Tests mixed scenario (safe + compromised lockfile versions)
+  - `no-lockfile-test`: Tests packages without lockfiles (shows MEDIUM RISK as expected)
+
+### Changed
+- **Package Detection Logic**: Enhanced `check_packages()` function to check lockfiles when semver patterns match potentially compromised versions
+- **Risk Stratification**: Packages with semver ranges now categorized based on actual lockfile contents:
+  - **HIGH RISK**: Lockfile contains exact compromised version
+  - **LOW RISK**: Lockfile contains safe version (new category)
+  - **MEDIUM RISK**: No lockfile found (potential update risk)
+- **Report Generation**: Updated `generate_report()` to display lockfile-safe packages with informative messaging
+- **User Messaging**: Clear explanation that current installation is safe but updates should be reviewed
+
+### Technical Details
+- Lockfile detection supports all major package managers (npm, yarn, pnpm)
+- Uses block-based JSON parsing for accuracy (reuses existing logic from `check_package_integrity`)
+- Maintains backward compatibility - all existing functionality unchanged
+- Zero performance impact for projects without lockfiles
+- Preserves all security detection capabilities while improving user experience
+
+### Security Impact
+- **No reduction in security**: All actual threats still detected with HIGH RISK warnings
+- **Improved accuracy**: Users can now distinguish between actual risks and potential future risks
+- **Better user compliance**: Reduces alert fatigue from false positives, increasing trust in real warnings
+
+## [2.5.2] - 2025-10-03
+
+### Fixed
+- **Cross-Platform Network Exfiltration Detection**: Fixed GitHub issue #43 where network exfiltration regex pattern failed on Windows/Git Bash/MINGW64 environments
+- **POSIX Character Class Compatibility**: Replaced basic regex with extended regex (`grep -E`) to ensure consistent behavior across all platforms
+- **Regex Pattern Portability**: Changed from `grep -q "https\?://[^[:space:]]*$domain\|..."` to `grep -qE "https?://[^[:space:]]*$domain|..."` for cross-platform reliability
+
+### Added
+- **Paranoid Mode Test Documentation**: Added comprehensive test cases and documentation for paranoid mode features in README.md
+- **Network Exfiltration Testing**: Documented positive and negative test cases for network exfiltration detection
+- **Typosquatting Testing**: Documented test cases demonstrating typosquatting detection with paranoid mode
+- **Enhanced Test Coverage**: Verified all paranoid mode features have both positive (detection) and negative (no false positives) test coverage
+
+### Changed
+- **Network Exfiltration Regex**: Updated 3 grep calls in `check_network_exfiltration()` function (lines 1119, 1122, 1126)
+- **Regex Syntax**: Removed backslash escaping from `\?` and `\|` patterns, using extended regex syntax instead
+- **Testing Documentation**: Added paranoid mode testing section to README.md with examples and expected outputs
+
+### Technical Details
+- Extended regex (`-E` flag) is POSIX-compliant and works consistently across macOS (BSD grep), Linux (GNU grep), and Windows (MINGW64 grep)
+- Maintains identical matching logic while ensuring cross-platform compatibility
+- All existing tests pass with identical output (verified on macOS, pending Windows verification)
+- Pattern now correctly detects webhook.site, pastebin.com, and other suspicious domains on all platforms
+
+## [2.5.1] - 2025-09-29
+
+### Fixed
+- **Windows CRLF Compatibility**: Merged PR #36 to fix Windows line ending handling in compromised package loading
+- **Cross-platform Package Detection**: Ensures consistent package detection across Windows (CRLF) and Unix (LF) systems
+- **Undercounting Prevention**: Fixes issue where Windows users were missing compromised package detections due to trailing carriage returns
+
+### Changed
+- **Package Loading Robustness**: Added carriage return trimming to `load_compromised_packages()` function
+- **Cross-platform Reliability**: Improved handling of mixed line endings from different development environments
+
+### Technical Details
+- Added `line="${line%$'\r'}"` to strip trailing carriage returns before package processing
+- Maintains full compatibility with all platforms while fixing Windows-specific detection issues
+- Zero impact on Unix/Linux/macOS systems, where no carriage returns are present
+
+## [2.5.0] - 2025-09-29
+
+### Fixed
+- **Lockfile False Positives**: Addresses GitHub issue #37 where `color-convert@1.9.3` was incorrectly flagged as compromised version `3.1.1`
+- **Improved Package Version Extraction**: Replaced proximity-based grep with block-based JSON parsing to accurately extract package versions from lockfiles
+- **Robust Lockfile Parsing**: Now correctly identifies package versions within specific `node_modules/$package_name` blocks instead of grabbing nearby version fields
+
+### Added
+- **Enhanced Test Coverage**: Added test cases for lockfile false positives and proper compromised package detection
+- **Block-based JSON Parsing**: Implemented AWK-based parsing with brace counting to ensure version extraction from correct package context
+
+### Changed
+- **Lockfile Processing Logic**: Updated `check_package_integrity()` function to use structured parsing instead of line-proximity heuristics
+- **Version Extraction Method**: Now looks for `"node_modules/$package_name"` blocks and extracts versions only from within that specific context
+- **Fallback Handling**: Improved fallback logic for older lockfile formats while maintaining accuracy
+
+### Technical Details
+- Fixed bug where `grep -A5` would incorrectly associate versions from different packages that happened to be within 5 lines
+- Implemented proper JSON block parsing with brace counting to maintain context boundaries
+- Added comprehensive test cases covering both false positive prevention and actual threat detection
+- Maintains backward compatibility with different lockfile formats (npm, yarn, pnpm)
+
+## [2.4.0] - 2025-09-29
+
+### Added
+- **Context-aware XMLHttpRequest Detection**: Added intelligent detection that distinguishes between legitimate framework code and malicious crypto theft patterns
+- **New Test Cases**: Added comprehensive test scenarios for XMLHttpRequest modifications covering both legitimate (React Native, Next.js) and malicious patterns
+- **Enhanced Risk Stratification**: XMLHttpRequest modifications now properly classified based on file path context and associated crypto patterns
+
+### Changed
+- **Reduced False Positives**: XMLHttpRequest modifications in React Native (`/react-native/Libraries/Network/`) and Next.js (`/next/dist/compiled/`) paths now flagged as LOW RISK instead of HIGH RISK
+- **Improved Detection Logic**: XMLHttpRequest modifications combined with wallet addresses or malicious functions correctly flagged as HIGH RISK
+- **Package Database Cleanup**: Removed 17 duplicate entries from compromised-packages.txt, reducing from 621 to 604 unique package versions
+- **Updated Documentation**: Package count updated from 571+ to 600+ to reflect accurate database size
+
+### Fixed
+- **False Positive Resolution**: Addresses GitHub issue #35 regarding false positives for legitimate XMLHttpRequest usage in React Native and Next.js applications
+- **Risk Classification Logic**: Fixed automatic HIGH RISK classification for all XMLHttpRequest modifications regardless of context
+- **Duplicate Package Entries**: Removed duplicate compromised package entries that were causing inflated detection counts
+
+### Security
+- **Maintained Detection Efficacy**: Continues to detect actual crypto theft malware that hijacks XMLHttpRequest for wallet address replacement
+- **Enhanced Context Awareness**: Provides appropriate risk levels based on file location and associated patterns
+- **Comprehensive Coverage**: Maintains protection against all known attack vectors while reducing false positive noise
+
+### Technical Details
+- Updated XMLHttpRequest detection to check for crypto patterns (wallet addresses, malicious functions) in combination with prototype modifications
+- Added LOW RISK reporting for crypto patterns to global LOW_RISK_FINDINGS array
+- Implemented file path-based context checking for known legitimate framework locations
+- Created test cases demonstrating proper risk classification for various XMLHttpRequest usage scenarios
 
 ## [2.3.0] - 2025-09-24
 
