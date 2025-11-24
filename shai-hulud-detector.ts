@@ -69,6 +69,15 @@ const TYPOSQUATTING_WARNINGS: string[] = [];
 const NETWORK_EXFILTRATION_WARNINGS: string[] = [];
 const LOCKFILE_SAFE_VERSIONS: string[] = [];
 
+// November 2025 attack additions (parity with Bash implementation)
+const BUN_SETUP_FILES: string[] = [];
+const BUN_ENVIRONMENT_FILES: string[] = [];
+const NEW_WORKFLOW_FILES: string[] = [];
+const ACTIONS_SECRETS_FILES: string[] = [];
+const PREINSTALL_BUN_PATTERNS: string[] = [];
+const GITHUB_SHA1HULUD_RUNNERS: string[] = [];
+const SECOND_COMING_REPOS: string[] = [];
+
 let COMPROMISED_PACKAGES: string[] = [];
 
 // Temporary files for cleanup
@@ -226,6 +235,104 @@ async function checkWorkflowFiles(scanDir: string): Promise<void> {
     }
 }
 
+// November 2025: Bun attack artifacts
+async function checkBunAttackFiles(scanDir: string): Promise<void> {
+    printStatus(COLORS.BLUE, "🔍 Checking for November 2025 Bun attack files...");
+    // setup_bun.js
+    for await (const file of findFilesByPattern(scanDir, /(^|\/)setup_bun\.js$/)) {
+        try {
+            const stat = await Deno.stat(file);
+            if (stat.isFile) {
+                BUN_SETUP_FILES.push(file);
+            }
+        } catch {}
+    }
+    // bun_environment.js
+    for await (const file of findFilesByPattern(scanDir, /(^|\/)bun_environment\.js$/)) {
+        try {
+            const stat = await Deno.stat(file);
+            if (stat.isFile) {
+                BUN_ENVIRONMENT_FILES.push(file);
+            }
+        } catch {}
+    }
+}
+
+// November 2025: new workflow and secrets files
+async function checkNewWorkflowPatterns(scanDir: string): Promise<void> {
+    printStatus(COLORS.BLUE, "🔍 Checking for new workflow patterns...");
+    // .github/workflows/formatter_*.yml
+    const formatterPattern = /(^|\/)\.github\/workflows\/formatter_.*\.yml$/;
+    for await (const file of findFilesByPattern(scanDir, formatterPattern)) {
+        try {
+            const stat = await Deno.stat(file);
+            if (stat.isFile) NEW_WORKFLOW_FILES.push(file);
+        } catch {}
+    }
+    // actionsSecrets.json
+    for await (const file of findFilesByPattern(scanDir, /(^|\/)actionsSecrets\.json$/)) {
+        try {
+            const stat = await Deno.stat(file);
+            if (stat.isFile) ACTIONS_SECRETS_FILES.push(file);
+        } catch {}
+    }
+}
+
+// November 2025: preinstall bun pattern in package.json
+async function checkPreinstallBunPatterns(scanDir: string): Promise<void> {
+    printStatus(COLORS.BLUE, "🔍 Checking for fake Bun preinstall patterns...");
+    for await (const file of findFilesByPattern(scanDir, /(^|\/)package\.json$/)) {
+        try {
+            const content = await Deno.readTextFile(file);
+            if (/"preinstall"\s*:\s*"node setup_bun\.js"/.test(content)) {
+                PREINSTALL_BUN_PATTERNS.push(file);
+            }
+        } catch {}
+    }
+}
+
+// November 2025: SHA1HULUD runners in workflows
+async function checkGithubActionsRunner(scanDir: string): Promise<void> {
+    printStatus(COLORS.BLUE, "🔍 Checking for SHA1HULUD GitHub Actions runners...");
+    for await (const file of findFilesByPattern(scanDir, /\.(yml|yaml)$/)) {
+        try {
+            const content = await Deno.readTextFile(file);
+            if (/SHA1HULUD/i.test(content)) {
+                GITHUB_SHA1HULUD_RUNNERS.push(file);
+            }
+        } catch {}
+    }
+}
+
+// November 2025: repo descriptions with "Second Coming" text
+async function checkSecondComingRepos(scanDir: string): Promise<void> {
+    printStatus(COLORS.BLUE, "🔍 Checking for 'Second Coming' repository descriptions...");
+    // Look for .git directories and read config for description. We cannot run git; parse config file instead.
+    for await (const gitDir of findFilesByPattern(scanDir, /(^|\/)\.git$/)) {
+        try {
+            const stat = await Deno.stat(gitDir);
+            if (!stat.isDirectory) continue;
+            const repoDir = gitDir.replace(/\/\.git$/, '');
+            const configPath = `${gitDir}/config`;
+            try {
+                const config = await Deno.readTextFile(configPath);
+                // Git doesn't store description here normally, but support custom key if present
+                if (/Sha1-Hulud: The Second Coming/.test(config)) {
+                    SECOND_COMING_REPOS.push(repoDir);
+                }
+            } catch {
+                // Some repos may have description in .git/description
+                try {
+                    const desc = await Deno.readTextFile(`${gitDir}/description`);
+                    if (desc.includes('Sha1-Hulud: The Second Coming')) {
+                        SECOND_COMING_REPOS.push(repoDir);
+                    }
+                } catch {}
+            }
+        } catch {}
+    }
+}
+
 async function checkFileHashes(scanDir: string): Promise<void> {
     // Use generator to collect files first
     const jsFiles: string[] = [];
@@ -270,6 +377,8 @@ async function checkPackages(scanDir: string): Promise<void> {
     
     printStatus(COLORS.BLUE, `🔍 Checking ${packageFiles.length} package.json files for compromised packages...`);
     let fileProcessedCounter = 0;
+    const pkgNameVersionRegexEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
     const packagePromises = packageFiles.map(async (packageFile) => {
         try {
             const content = await Deno.readTextFile(packageFile);
@@ -279,45 +388,75 @@ async function checkPackages(scanDir: string): Promise<void> {
                 const progressText = `\r\x1b[K${fileProcessedCounter} / ${packageFiles.length} checked (${Math.floor((fileProcessedCounter) * 100 / packageFiles.length)}%)`;
                 Deno.stdout.writeSync(new TextEncoder().encode(progressText));
             }
-            
-            // Check for specific compromised packages
-            for (const packageInfo of COMPROMISED_PACKAGES) {
-                const [packageName, maliciousVersion] = packageInfo.split(':');
-                
-                if (content.includes(`"${packageName}"`)) {
-                    // Extract version more precisely
-                    const regex = new RegExp(`"${packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}":\\s*"([^"]+)"`);
-                    const match = content.match(regex);
-                    if (match) {
-                        const foundVersion = match[1];
-                        if (foundVersion === maliciousVersion) {
-                            // Exact match - definitely compromised
-                            COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${maliciousVersion}`);
-                        } else if (semverMatch(maliciousVersion, foundVersion)) {
-                            // Semver pattern match - check lockfile for actual version
-                            const packageDir = packageFile.replace(/\/package\.json$/, '');
-                            const actualVersion = await getLockfileVersion(packageName, packageDir, scanDir);
-                            
-                            if (actualVersion) {
-                                if (actualVersion === maliciousVersion) {
-                                    // Lockfile contains exact compromised version - HIGH RISK
-                                    COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
-                                } else if (semverMatch(maliciousVersion, actualVersion)) {
-                                    // Lockfile version still matches pattern - MEDIUM RISK
-                                    SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
+
+            // Try to parse JSON to preserve dependency order like Bash (awk over file order)
+            let handledViaJson = false;
+            try {
+                const pkg = JSON.parse(content);
+                const sections: Array<Record<string, string> | undefined> = [pkg.dependencies, pkg.devDependencies];
+                for (const section of sections) {
+                    if (!section || typeof section !== 'object') continue;
+                    for (const [packageName, foundVersion] of Object.entries(section)) {
+                        // For each declared dependency, check against compromised list for this package
+                        for (const packageInfo of COMPROMISED_PACKAGES) {
+                            const [malName, maliciousVersion] = packageInfo.split(':');
+                            if (malName !== packageName) continue;
+                            if (foundVersion === maliciousVersion) {
+                                COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${maliciousVersion}`);
+                            } else if (semverMatch(maliciousVersion, foundVersion)) {
+                                const packageDir = packageFile.replace(/\/package\.json$/, '');
+                                const actualVersion = await getLockfileVersion(packageName, packageDir, scanDir);
+                                if (actualVersion) {
+                                    if (actualVersion === maliciousVersion) {
+                                        COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${actualVersion}`);
+                                    } else if (semverMatch(maliciousVersion, actualVersion)) {
+                                        SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
+                                    } else {
+                                        LOCKFILE_SAFE_VERSIONS.push(`${packageFile}:${packageName}@${foundVersion} (locked to ${actualVersion} - safe)`);
+                                    }
                                 } else {
-                                    // Lockfile pins to safe version - LOW RISK
-                                    LOCKFILE_SAFE_VERSIONS.push(`${packageFile}:${packageName}@${foundVersion} (locked to ${actualVersion} - safe)`);
+                                    SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${foundVersion}`);
                                 }
-                            } else {
-                                // No lockfile found - potential update risk - MEDIUM RISK
-                                SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${foundVersion}`);
+                            }
+                        }
+                    }
+                }
+                handledViaJson = true;
+            } catch {
+                // Fall back to regex method if JSON parse fails
+            }
+
+            if (!handledViaJson) {
+                // Fallback: original regex-based extraction
+                for (const packageInfo of COMPROMISED_PACKAGES) {
+                    const [packageName, maliciousVersion] = packageInfo.split(':');
+                    if (content.includes(`"${packageName}"`)) {
+                        const regex = new RegExp(`"${pkgNameVersionRegexEscape(packageName)}":\\s*"([^"]+)"`);
+                        const match = content.match(regex);
+                        if (match) {
+                            const foundVersion = match[1];
+                            if (foundVersion === maliciousVersion) {
+                                COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${maliciousVersion}`);
+                            } else if (semverMatch(maliciousVersion, foundVersion)) {
+                                const packageDir = packageFile.replace(/\/package\.json$/, '');
+                                const actualVersion = await getLockfileVersion(packageName, packageDir, scanDir);
+                                if (actualVersion) {
+                                    if (actualVersion === maliciousVersion) {
+                                        COMPROMISED_FOUND.push(`${packageFile}:${packageName}@${actualVersion}`);
+                                    } else if (semverMatch(maliciousVersion, actualVersion)) {
+                                        SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${actualVersion} (lockfile)`);
+                                    } else {
+                                        LOCKFILE_SAFE_VERSIONS.push(`${packageFile}:${packageName}@${foundVersion} (locked to ${actualVersion} - safe)`);
+                                    }
+                                } else {
+                                    SUSPICIOUS_FOUND.push(`${packageFile}:${packageName}@${foundVersion}`);
+                                }
                             }
                         }
                     }
                 }
             }
-            
+
             // Check for suspicious namespaces
             for (const namespace of COMPROMISED_NAMESPACES) {
                 if (content.includes(`"${namespace}/`)) {
@@ -328,7 +467,7 @@ async function checkPackages(scanDir: string): Promise<void> {
             // Skip files we can't read
         }
     });
-
+    
     await Promise.all(packagePromises);
     // Clear progress line
     Deno.stdout.writeSync(new TextEncoder().encode(`\r\x1b[K`));
@@ -425,9 +564,28 @@ async function checkCryptoTheftPatterns(scanDir: string): Promise<void> {
                 CRYPTO_THEFT_HIGH_RISK.push(`${file}:Phishing domain npmjs.help detected`);
             }
             
-            // MEDIUM RISK crypto theft patterns
+            // XMLHttpRequest prototype hijacking with context-aware risk classification (parity with Bash)
             if (content.includes('XMLHttpRequest.prototype.send')) {
-                CRYPTO_THEFT_MEDIUM_RISK.push(`${file}:XMLHttpRequest prototype modification detected`);
+                const inFrameworkPath = (
+                    file.includes('/react-native/Libraries/Network/') ||
+                    file.includes('/next/dist/compiled/')
+                );
+
+                const hasCryptoIndicators = /0x[a-fA-F0-9]{40}|checkethereumw|runmask|webhook\.site|npmjs\.help/.test(content);
+
+                if (inFrameworkPath) {
+                    if (hasCryptoIndicators) {
+                        CRYPTO_THEFT_HIGH_RISK.push(`${file}:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK`);
+                    } else {
+                        CRYPTO_THEFT_LOW_RISK.push(`${file}:XMLHttpRequest prototype modification detected in framework code - LOW RISK`);
+                    }
+                } else {
+                    if (hasCryptoIndicators) {
+                        CRYPTO_THEFT_HIGH_RISK.push(`${file}:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK`);
+                    } else {
+                        CRYPTO_THEFT_MEDIUM_RISK.push(`${file}:XMLHttpRequest prototype modification detected`);
+                    }
+                }
             }
             
             if (content.includes('javascript-obfuscator')) {
@@ -583,6 +741,24 @@ async function checkTrufflehogActivity(scanDir: string): Promise<void> {
                                 }
                             }
                     }
+                }
+
+                // November 2025 specific TruffleHog patterns from "The Second Coming" attack
+                if (/TruffleHog.*scan.*credential|download.*trufflehog|trufflehog.*env|trufflehog.*AWS|trufflehog.*NPM_TOKEN/i.test(content)) {
+                    if (contentSample.includes('download') && contentSample.includes('trufflehog') && contentSample.includes('scan')) {
+                        TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:November 2025 pattern - Automated TruffleHog download and credential scanning`);
+                    } else if (contentSample.includes('GitHub Action') && /trufflehog/i.test(contentSample)) {
+                        TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:November 2025 pattern - TruffleHog in GitHub Actions for credential theft`);
+                    } else if (contentSample.includes('environment') && contentSample.includes('token') && /trufflehog/i.test(contentSample)) {
+                        TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:November 2025 pattern - TruffleHog environment token harvesting`);
+                    } else {
+                        TRUFFLEHOG_ACTIVITY.push(`${file}:MEDIUM:Potential November 2025 TruffleHog attack pattern`);
+                    }
+                }
+
+                // Check for specific command execution patterns used in November 2025 attack
+                if (/curl.*trufflehog|wget.*trufflehog|bunExecutable.*trufflehog/i.test(content)) {
+                    TRUFFLEHOG_ACTIVITY.push(`${file}:HIGH:November 2025 pattern - Dynamic TruffleHog download via curl/wget/Bun`);
                 }
             } catch {
                 // Skip files we can't read
@@ -827,8 +1003,29 @@ async function checkNetworkExfiltration(scanDir: string): Promise<void> {
                     }
                 }
                 
-                // Additional checks for base64 decoding, DNS-over-HTTPS, WebSocket, etc.
+                // Additional checks for base64 encoding/decoding, DNS-over-HTTPS, WebSocket, etc.
                 if (!file.includes('/vendor/') && !file.includes('/node_modules/')) {
+                    // btoa near network operations (fetch/XMLHttpRequest/axios) excluding obvious auth headers
+                    if (content.includes('btoa(')) {
+                        const lines = content.split('\n');
+                        for (let i = 0; i < lines.length; i++) {
+                            if (!lines[i].includes('btoa(')) continue;
+                            // Build a small context window
+                            const from = Math.max(0, i - 3);
+                            const to = Math.min(lines.length - 1, i + 3);
+                            const windowText = lines.slice(from, to + 1).join('\n');
+                            const nearNetwork = /(fetch|XMLHttpRequest|axios)/.test(windowText);
+                            const looksLikeAuth = /(Authorization:|Basic\s|Bearer\s)/.test(windowText);
+                            if (nearNetwork && !looksLikeAuth) {
+                                const lineNum = i + 1;
+                                // Create short snippet from the current line
+                                const snippet = (lines[i].length > 80 ? lines[i].slice(0, 80) + '...' : lines[i]);
+                                NETWORK_EXFILTRATION_WARNINGS.push(`${file}:Suspicious base64 encoding near network operation at line ${lineNum}: ${snippet}`);
+                                break; // one finding per file is enough
+                            }
+                        }
+                    }
+
                     if (content.includes('atob(') || content.includes('base64') && content.includes('decode')) {
                         const lines = content.split('\n');
                         let lineNum = 0;
@@ -1061,7 +1258,50 @@ class ProgressIndicator {
 
 const progressIndicator = new ProgressIndicator();
 
+// Ensure deterministic ordering of findings to improve parity with Bash output
+function sortAllFindings(): void {
+    const arrays: string[][] = [
+        WORKFLOW_FILES,
+        MALICIOUS_HASHES,
+        COMPROMISED_FOUND,
+        SUSPICIOUS_FOUND,
+        SUSPICIOUS_CONTENT,
+        CRYPTO_THEFT_HIGH_RISK,
+        CRYPTO_THEFT_MEDIUM_RISK,
+        CRYPTO_THEFT_LOW_RISK,
+        GIT_BRANCHES,
+        POSTINSTALL_HOOKS,
+        TRUFFLEHOG_ACTIVITY,
+        SHAI_HULUD_REPOS,
+        NAMESPACE_WARNINGS,
+        LOW_RISK_FINDINGS,
+        INTEGRITY_ISSUES,
+        TYPOSQUATTING_WARNINGS,
+        NETWORK_EXFILTRATION_WARNINGS,
+        LOCKFILE_SAFE_VERSIONS,
+        // November 2025 additions
+        BUN_SETUP_FILES,
+        BUN_ENVIRONMENT_FILES,
+        NEW_WORKFLOW_FILES,
+        ACTIONS_SECRETS_FILES,
+        PREINSTALL_BUN_PATTERNS,
+        GITHUB_SHA1HULUD_RUNNERS,
+        SECOND_COMING_REPOS,
+    ] as unknown as string[][];
+
+    for (const arr of arrays) {
+        try {
+            // Sort by file path or entry string for stable output
+            arr.sort((a: string, b: string) => a.localeCompare(b));
+        } catch {
+            // ignore
+        }
+    }
+}
+
 function generateReport(paranoidMode: boolean): void {
+    // Stable ordering for parity during validation
+    sortAllFindings();
     console.log();
     printStatus(COLORS.BLUE, "==============================================");
     if (paranoidMode) {
@@ -1094,6 +1334,70 @@ function generateReport(paranoidMode: boolean): void {
             console.log(`   - ${filePath}`);
             console.log(`     Hash: ${hash}`);
             showFilePreview(filePath, "HIGH RISK: File matches known malicious SHA-256 hash");
+            highRisk++;
+        }
+    }
+
+    // Report November 2025 "Shai-Hulud: The Second Coming" attack files
+    if (BUN_SETUP_FILES.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: November 2025 Bun attack setup files detected:");
+        for (const file of BUN_SETUP_FILES) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: setup_bun.js - Fake Bun runtime installation malware");
+            highRisk++;
+        }
+    }
+
+    if (BUN_ENVIRONMENT_FILES.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: November 2025 Bun environment payload detected:");
+        for (const file of BUN_ENVIRONMENT_FILES) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: bun_environment.js - 10MB+ obfuscated credential harvesting payload");
+            highRisk++;
+        }
+    }
+
+    if (NEW_WORKFLOW_FILES.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: November 2025 malicious workflow files detected:");
+        for (const file of NEW_WORKFLOW_FILES) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: formatter_*.yml - Malicious GitHub Actions workflow");
+            highRisk++;
+        }
+    }
+
+    if (ACTIONS_SECRETS_FILES.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: Actions secrets exfiltration files detected:");
+        for (const file of ACTIONS_SECRETS_FILES) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: actionsSecrets.json - Double Base64 encoded secrets exfiltration");
+            highRisk++;
+        }
+    }
+
+    if (PREINSTALL_BUN_PATTERNS.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: Fake Bun preinstall patterns detected:");
+        for (const file of PREINSTALL_BUN_PATTERNS) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: package.json contains malicious preinstall: node setup_bun.js");
+            highRisk++;
+        }
+    }
+
+    if (GITHUB_SHA1HULUD_RUNNERS.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: SHA1HULUD GitHub Actions runners detected:");
+        for (const file of GITHUB_SHA1HULUD_RUNNERS) {
+            console.log(`   - ${file}`);
+            showFilePreview(file, "HIGH RISK: GitHub Actions workflow contains SHA1HULUD runner references");
+            highRisk++;
+        }
+    }
+
+    if (SECOND_COMING_REPOS.length > 0) {
+        printStatus(COLORS.RED, "🚨 HIGH RISK: 'Shai-Hulud: The Second Coming' repositories detected:");
+        for (const repoDir of SECOND_COMING_REPOS) {
+            console.log(`   - ${repoDir}`);
+            console.log("     Repository description: Sha1-Hulud: The Second Coming.");
             highRisk++;
         }
     }
@@ -1354,7 +1658,8 @@ function generateReport(paranoidMode: boolean): void {
     }
     
     const totalIssues = highRisk + mediumRisk;
-    const lowRiskCount = LOW_RISK_FINDINGS.length;
+    // Include both generic low-risk findings and crypto low-risk patterns
+    const lowRiskCount = LOW_RISK_FINDINGS.length + CRYPTO_THEFT_LOW_RISK.length;
     
     // Summary
     printStatus(COLORS.BLUE, "==============================================");
@@ -1483,14 +1788,21 @@ async function main(): Promise<void> {
             checkTrufflehogActivity(scanDir),
             checkGitBranches(scanDir),
             checkShaiHuludRepos(scanDir),
-            checkPackageIntegrity(scanDir)
+            checkPackageIntegrity(scanDir),
+            // New November 2025 checks
+            checkBunAttackFiles(scanDir),
+            checkNewWorkflowPatterns(scanDir),
+            checkPreinstallBunPatterns(scanDir),
+            checkGithubActionsRunner(scanDir),
+            checkSecondComingRepos(scanDir)
         ]),
         "🔍 Running security checks..."
     );
     
     // These need to run sequentially due to progress indicators
-    await checkPackages(scanDir);
+    // Match Bash output order: file hash check before package.json check
     await checkFileHashes(scanDir);
+    await checkPackages(scanDir);
     
     // Run additional security checks only in paranoid mode
     if (paranoidMode) {
