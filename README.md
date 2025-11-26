@@ -55,7 +55,13 @@ chmod +x shai-hulud-detector.sh
 
 # For comprehensive security scanning
 ./shai-hulud-detector.sh --paranoid /path/to/your/project
+
+# Check exit code for CI/CD integration
+./shai-hulud-detector.sh /path/to/your/project
+echo "Exit code: $?"  # 0=clean, 1=high-risk, 2=medium-risk
 ```
+
+**CI/CD Integration**: The script returns appropriate exit codes (0=clean, 1=high-risk, 2=medium-risk) for seamless integration into automated security pipelines.
 
 ## Quick Start - Deno Version
 
