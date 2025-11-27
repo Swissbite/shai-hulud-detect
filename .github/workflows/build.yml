@@ -1,0 +1,66 @@
+name: Build Kotlin and Native Images
+
+on:
+  push:
+    branches: [ main, master, kotlin-graal ]
+    tags: ['v*', 'release-*']
+  pull_request:
+    branches: [ main, master, kotlin-graal ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java (GraalVM 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'graalvm'
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Verify Gradle
+        run: |
+          ./gradlew --version
+        shell: bash
+
+      - name: Make Bash script executable (POSIX)
+        if: runner.os != 'Windows'
+        run: chmod +x ./shai-hulud-detector.sh
+
+      - name: Build JVM app and distribution
+        run: |
+          ./gradlew :kotlin-app:clean :kotlin-app:build :kotlin-app:installDist :kotlin-app:distZip
+        shell: bash
+
+      - name: Build Native Image and package bundle
+        run: |
+          ./gradlew :kotlin-app:nativeCompile :kotlin-app:packageNative
+        shell: bash
+
+      - name: Upload JVM distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: shai-hulud-detector-jvm-${{ runner.os }}
+          path: |
+            kotlin-app/build/distributions/*.zip
+            kotlin-app/build/install/**
+
+      - name: Upload Native bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: shai-hulud-detector-native-${{ runner.os }}
+          path: |
+            kotlin-app/build/distributions/shai-hulud-detector-native-*.zip
+            kotlin-app/build/native/nativeCompile/**

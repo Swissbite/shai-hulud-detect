@@ -4,3 +4,25 @@ target
 .claude
 scratch
 *.plan
+
+# Gradle caches/build
+.gradle/
+**/build/
+
+# IntelliJ/IDEA
+.idea/
+*.iml
+
+# Local parity/diagnostic outputs
+out.*
+exit.*
+*.diff
+
+# Test output staging directory
+test-out/
+
+# Native image cache files
+*.native-image.args
+
+# OS cruft
+Thumbs.db
